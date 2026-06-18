@@ -1,0 +1,26 @@
+# Core LLM & Orchestration (LangChain)
+langchain-core==1.4.7
+langchain-google-genai==4.2.5
+langchain-ollama==1.1.0
+langchain-aws==1.5.1
+langchain-openai
+
+# Search Clients
+ddgs==9.14.4
+duckduckgo_search==8.1.1
+exa-py==2.14.0
+
+# Scrapers & Crawlers
+firecrawl-py==0.0.16
+Crawl4AI==0.8.9
+trafilatura==1.12.2
+
+# Scoring & Machine Learning
+sentence-transformers==5.6.0
+scikit-learn==1.9.0
+
+# Infrastructure & Utilities
+pydantic==2.13.4
+python-dotenv==1.2.2
+boto3==1.43.31
+rich==15.0.0
