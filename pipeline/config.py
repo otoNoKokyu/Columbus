@@ -30,8 +30,8 @@ class ResearchPipelineConfig:
     top_links_after_embedding: int = 20
 
     # ── Reranking ───────────────────────────────────────
-    reranker_strategy: str = "cross-encoder"  # "cross-encoder" | "llm"
-    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_strategy: str = "pinecone"
+    pinecone_rerank_model: str = "bge-reranker-v2-m3"
     top_links_after_rerank: int = 5
 
     # ── Recursive Crawl ─────────────────────────────────

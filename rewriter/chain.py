@@ -4,6 +4,7 @@ Generates up to N semantically distinct search queries optimized for
 web search engines. Copied pattern from refactor/rewriter/chain.py.
 """
 
+from ..types.types import RewriterInput, Query
 import logging
 from typing import List, Dict, Any
 
@@ -39,7 +40,7 @@ def create_rewrite_chain(
         try:
             parsed = _inner.invoke(
                 {"question": question, "max_queries": max_queries},
-                config={"run_name": "ResearchAgent:QueryRewrite"},
+                config={"run_name": "Columbus:QueryRewrite"},
             )
             if isinstance(parsed, dict):
                 queries = parsed.get("queries", [])
@@ -57,4 +58,25 @@ def create_rewrite_chain(
             logger.error("Query rewrite failed: %s", e)
             return fallback
 
-    return RunnableLambda(_rewrite)
+    return RunnableLambda(_rewrite).with_config({"run_name": "QueryRewriterNode"})
+
+
+def create_balanced_rewrite_chain(
+    llm: BaseChatModel,
+) -> Runnable[RewriterInput, Query]:
+    """Build an LCEL chain that rewrites a query into exactly two balanced queries.
+
+    One supporting/mimicking the query premise, and one opposing.
+    """
+    from .prompts import BALANCED_REWRITE_PROMPT
+    from typing import cast
+
+    structured_llm = llm.with_structured_output(Query)
+    return cast(
+        Runnable[RewriterInput, Query],
+        (
+            RunnableLambda(lambda x: {"query": x.query})
+            | BALANCED_REWRITE_PROMPT
+            | structured_llm
+        ).with_config({"run_name": "BalancedQueryRewriterNode"})
+    )

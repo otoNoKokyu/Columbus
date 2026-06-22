@@ -1,4 +1,4 @@
-"""Functional tests for ResearchAgent modules — NO LLM calls.
+"""Functional tests for Columbus modules — NO LLM calls.
 
 Tests link_extractor, embedding_scorer, config, and callbacks.
 """
@@ -15,7 +15,7 @@ logger = logging.getLogger("test")
 
 def test_link_extractor():
     """Test pure markdown link extraction."""
-    from ResearchAgent.crawl.link_extractor import extract_links_from_markdown
+    from Columbus.crawl.link_extractor import extract_links_from_markdown
 
     md = """
 # Python Resources
@@ -42,7 +42,7 @@ A [duplicate](https://docs.python.org/3/) should be deduplicated.
 
 def test_embedding_scorer():
     """Test embedding-based scoring — downloads model on first run (~80MB)."""
-    from ResearchAgent.scoring.embedding_scorer import EmbeddingScorer
+    from Columbus.scoring.embedding_scorer import EmbeddingScorer
 
     scorer = EmbeddingScorer(model_name="all-MiniLM-L6-v2")
 
@@ -69,11 +69,16 @@ def test_embedding_scorer():
 
 def test_pipeline_config():
     """Test frozen dataclass config."""
-    from ResearchAgent.pipeline.config import ResearchPipelineConfig
+    from Columbus.pipeline.config import ResearchPipelineConfig
 
-    config = ResearchPipelineConfig(reranker_strategy="llm", top_links_after_rerank=3)
-    assert config.reranker_strategy == "llm"
+    config = ResearchPipelineConfig(top_links_after_rerank=3)
+    assert config.reranker_strategy == "pinecone"
     assert config.top_links_after_rerank == 3
+
+    config_custom = ResearchPipelineConfig(pinecone_rerank_model="cohere-rerank-3.5")
+    assert config_custom.reranker_strategy == "pinecone"
+    assert config_custom.pinecone_rerank_model == "cohere-rerank-3.5"
+
     try:
         config.reranker_strategy = "cross-encoder"
         assert False, "Should be frozen"
@@ -84,7 +89,7 @@ def test_pipeline_config():
 
 def test_token_callback():
     """Test callback handler initializes correctly."""
-    from ResearchAgent.utils.callbacks import TokenAccumulatorCallbackHandler
+    from Columbus.utils.callbacks import TokenAccumulatorCallbackHandler
 
     cb = TokenAccumulatorCallbackHandler()
     assert cb.input_tokens == 0

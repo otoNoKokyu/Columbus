@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
 from .base import BaseScorer
-from ResearchAgent.llm.llm import get_langchain_llm
+from ..llm.llm import get_langchain_llm
 
 logger = logging.getLogger(__name__)
 

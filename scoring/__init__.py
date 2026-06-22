@@ -26,22 +26,20 @@ __all__ = [
 # Reranker registry
 # ---------------------------------------------------------------------------
 RERANKERS: Dict[str, str] = {
-    "cross-encoder": "CrossEncoderReranker",
-    "llm": "LLMRelevanceReranker",
+    "pinecone": "PineconeReranker",
 }
 
-DEFAULT_RERANKER = "cross-encoder"
+DEFAULT_RERANKER = "pinecone"
 
 
 def get_reranker(name: Optional[str] = None, **kwargs) -> BaseReranker:
     """Instantiate and return a reranker by name.
 
     Args:
-        name: Key in the RERANKERS dict. Defaults to 'cross-encoder'.
+        name: Key in the RERANKERS dict. Defaults to 'pinecone'.
         **kwargs: Arguments passed to the reranker constructor.
 
-            For 'cross-encoder': model_name, top_n.
-            For 'llm': llm (required), top_n, max_concurrency.
+            For 'pinecone': model_name, api_key, top_n.
 
     Returns:
         A BaseReranker instance.
@@ -51,12 +49,9 @@ def get_reranker(name: Optional[str] = None, **kwargs) -> BaseReranker:
     """
     name = name or DEFAULT_RERANKER
 
-    if name == "cross-encoder":
-        from .cross_encoder_reranker import CrossEncoderReranker
-        return CrossEncoderReranker(**kwargs)
-    elif name == "llm":
-        from .llm_relevance_ranker import LLMRelevanceReranker
-        return LLMRelevanceReranker(**kwargs)
+    if name == "pinecone":
+        from .pinecone_reranker import PineconeReranker
+        return PineconeReranker(**kwargs)
     else:
         available = ", ".join(sorted(RERANKERS.keys()))
         raise ValueError(

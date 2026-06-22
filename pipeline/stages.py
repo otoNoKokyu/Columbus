@@ -34,7 +34,7 @@ def build_rewrite_stage(
         queries = rewrite_chain.invoke(
             {"question": state["query"]},
             config={
-                "run_name": "ResearchAgent:QueryRewrite",
+                "run_name": "Columbus:QueryRewrite",
                 "callbacks": state.get("callbacks"),
             },
         )
@@ -56,7 +56,7 @@ def build_search_stage(
 
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         import asyncio
-        from ResearchAgent.search import fan_out_search
+        from ..search import fan_out_search
 
         queries = state.get("rewritten_queries", [])
         logger.info(
@@ -93,7 +93,7 @@ def build_firecrawl_stage(
 
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         import asyncio
-        from ResearchAgent.crawl.firecrawl_engine import scrape_urls_for_markdown
+        from ..crawl.firecrawl_engine import scrape_urls_for_markdown
 
         urls = state.get("top_urls", [])
         logger.info(
@@ -120,7 +120,7 @@ def build_link_extraction_stage() -> Callable:
     """Stage 5: Extract hyperlinks from crawled markdown pages."""
 
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
-        from ResearchAgent.crawl.link_extractor import extract_links_from_markdown
+        from ..crawl.link_extractor import extract_links_from_markdown
 
         pages = state.get("crawled_pages", [])
         logger.info(
@@ -238,7 +238,7 @@ def build_recursive_crawl_stage(
 
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         import asyncio
-        from ResearchAgent.crawl.recursive_crawler import recursive_crawl
+        from ..crawl.recursive_crawler import recursive_crawl
 
         seed_urls = [r.get("url", "") for r in state.get("reranked_links", [])]
         logger.info(

@@ -26,10 +26,10 @@ def create_research_chain(
     pipeline stages. This is the only place that imports concrete
     implementations.
     """
-    from ResearchAgent.llm import get_langchain_llm
-    from ResearchAgent.rewriter import create_rewrite_chain
-    from ResearchAgent.scoring import get_reranker
-    from ResearchAgent.scoring.embedding_scorer import EmbeddingScorer
+    from ..llm import get_langchain_llm
+    from ..rewriter import create_rewrite_chain
+    from ..scoring import get_reranker
+    from ..scoring.embedding_scorer import EmbeddingScorer
 
     logger.info("Creating research chain with config: %s", config)
 
@@ -45,18 +45,11 @@ def create_research_chain(
     embedding_scorer = EmbeddingScorer(model_name=config.embedding_model)
 
     # ── Build reranker ─────────────────────────────────────────────
-    if config.reranker_strategy == "llm":
-        reranker = get_reranker(
-            "llm",
-            llm=llm,
-            top_n=config.top_links_after_rerank,
-        )
-    else:
-        reranker = get_reranker(
-            "cross-encoder",
-            model_name=config.cross_encoder_model,
-            top_n=config.top_links_after_rerank,
-        )
+    reranker = get_reranker(
+        "pinecone",
+        model_name=config.pinecone_rerank_model,
+        top_n=config.top_links_after_rerank,
+    )
 
     logger.info("Research chain created successfully")
 

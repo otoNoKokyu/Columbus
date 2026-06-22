@@ -9,7 +9,7 @@ from typing import Any
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
-logger = logging.getLogger("ResearchAgent.token_measurer")
+logger = logging.getLogger("Columbus.token_measurer")
 
 
 class TokenMeasurerCallbackHandler(BaseCallbackHandler):

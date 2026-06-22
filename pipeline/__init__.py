@@ -2,7 +2,7 @@
 
 Usage::
 
-    from ResearchAgent.pipeline import create_research_chain, ResearchPipelineConfig
+    from Columbus.pipeline import create_research_chain, ResearchPipelineConfig
 
     config = ResearchPipelineConfig()
     chain = create_research_chain(config)

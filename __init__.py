@@ -1,4 +1,4 @@
-# ResearchAgent package
+# Columbus package
 
 
 def create_research_chain(*args, **kwargs):
@@ -11,7 +11,7 @@ def __getattr__(name):
     if name == "ResearchPipelineConfig":
         from .pipeline.config import ResearchPipelineConfig
         return ResearchPipelineConfig
-    raise AttributeError(f"module 'ResearchAgent' has no attribute {name!r}")
+    raise AttributeError(f"module 'Columbus' has no attribute {name!r}")
 
 
 __all__ = [

@@ -1,3 +1,4 @@
+from exa_py.api import ContentsOptions
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
@@ -17,6 +18,12 @@ except ImportError:
         DDGS = None
 
 logger = logging.getLogger(__name__)
+
+SOCIAL_MEDIA_DOMAINS = [
+    "facebook.com", "twitter.com", "x.com", "instagram.com", "tiktok.com",
+    "reddit.com", "linkedin.com", "youtube.com", "pinterest.com", "tumblr.com",
+    "quora.com", "twitch.tv", "medium.com"
+]
 
 
 class BaseSearchClient(ABC):
@@ -86,9 +93,17 @@ class DuckDuckGoSearchClient(BaseSearchClient):
                 # Standardize output schema: title, url, snippet
                 standardized_results = []
                 for item in results:
+                    url = item.get("href", "")
+                    if url:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(url)
+                        path_lower = parsed.path.lower()
+                        if any(path_lower.endswith(ext) for ext in {'.pdf', '.zip', '.tar', '.gz', '.png', '.jpg', '.jpeg', '.gif', '.svg'}) or '/pdf/' in path_lower or '.pdf' in url.lower():
+                            logger.info("DuckDuckGoSearchClient: Filtering out PDF/unwanted URL from search results: %s", url)
+                            continue
                     standardized_results.append({
                         "title": item.get("title", ""),
-                        "url": item.get("href", ""),
+                        "url": url,
                         "snippet": item.get("body", "")
                     })
                 return standardized_results
@@ -128,26 +143,60 @@ class ExaSearchClient(BaseSearchClient):
         merged_kwargs.pop("safesearch", None)
         merged_kwargs.pop("timelimit", None)
 
+        # Merge user-supplied exclude_domains with default social media domains
+        exclude_domains = merged_kwargs.pop("exclude_domains", []) or []
+        if isinstance(exclude_domains, str):
+            exclude_domains = [exclude_domains]
+        all_excludes = list(set(list(exclude_domains) + SOCIAL_MEDIA_DOMAINS))
+        merged_kwargs["exclude_domains"] = all_excludes
+
         try:
-            res = self.exa.search_and_contents(
+            contents_config = ContentsOptions(
+                highlights=True,
+                subpages=5,
+            )
+
+            # Make the API call passing the configuration object
+            res = self.exa.search(
                 query,
+                type="neural",
                 num_results=max_results,
-                highlights={"num_sentences": 2, "highlights_per_url": 1},
+                contents=contents_config,
                 **merged_kwargs
             )
             
             standardized_results = []
+            
+            # Iterate through results and parse parameters safely
             for item in res.results:
-                # Use the smart highlight if available, otherwise fallback to truncated text
-                snippet = item.highlights[0] if getattr(item, "highlights", None) else (item.text[:500] if item.text else "")
-                score = item.highlightScores[0] if getattr(item, "highlightScores", None) else None
+                url = getattr(item, "url", "") or ""
+                if url:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    path_lower = parsed.path.lower()
+                    if any(path_lower.endswith(ext) for ext in {'.pdf', '.zip', '.tar', '.gz', '.png', '.jpg', '.jpeg', '.gif', '.svg'}) or '/pdf/' in path_lower or '.pdf' in url.lower():
+                        logger.info("ExaSearchClient: Filtering out PDF/unwanted URL from search results: %s", url)
+                        continue
+
+                # Safeguard text extracts if highlights arrays are empty or unavailable
+                if getattr(item, "highlights", None) and len(item.highlights) > 0:
+                    snippet = item.highlights[0]
+                else:
+                    snippet = item.text[:500] if getattr(item, "text", None) else ""
+                    
+                # Extract subpages safely (the SDK populates them inside item.subpages)
+                subpages_list = getattr(item, "subpages", []) or []
                 
                 standardized_results.append({
-                    "title": item.title or "",
-                    "url": item.url or "",
+                    "title": getattr(item, "title", "") or "",
+                    "url": url,
+                    "publishedDate": getattr(item, "published_date", "") or "",
                     "snippet": snippet,
-                    "highlight_score": score
+                    "dss": subpages_list, # Extracted nested subpages array mapped to your custom key
+                    "score": getattr(item, "score", None),
+                    "highlightScore": getattr(item, "highlight_scores", None)
                 })
+            
             return standardized_results
         except Exception as e:
             logger.error("Error during Exa search execution: %s", e)
@@ -234,7 +283,7 @@ async def fan_out_search(
     seen_urls: set = set()
 
     for query, results in zip(queries, all_results):
-        if isinstance(results, Exception):
+        if isinstance(results, BaseException):
             logger.error("fan_out_search: Query '%s' failed: %s", query, results)
             continue
         for result in results:
@@ -248,7 +297,7 @@ async def fan_out_search(
     logger.info(
         "fan_out_search: %d queries → %d total results → %d unique",
         len(queries), sum(
-            len(r) for r in all_results if not isinstance(r, Exception)
+            len(r) for r in all_results if not isinstance(r, BaseException)
         ), len(merged),
     )
 

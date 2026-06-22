@@ -16,12 +16,16 @@ class EmbeddingScorer(BaseScorer):
     dense vectors, then ranks by cosine similarity.
     """
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        from sentence_transformers import SentenceTransformer
-
-        self._model = SentenceTransformer(model_name)
+    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5"):
         self._model_name = model_name
-        logger.info("EmbeddingScorer initialized: %s", model_name)
+        self._model = None
+        logger.info("EmbeddingScorer initialized locally for model: %s", model_name)
+
+    def _get_model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(self._model_name)
+        return self._model
 
     async def score(
         self,
@@ -45,6 +49,7 @@ class EmbeddingScorer(BaseScorer):
 
         def _compute():
             from sklearn.metrics.pairwise import cosine_similarity
+            import numpy as np
 
             # Build candidate text representations
             texts = [
@@ -52,9 +57,14 @@ class EmbeddingScorer(BaseScorer):
                 for c in candidates
             ]
 
-            # Batch encode query and candidates
-            query_emb = self._model.encode([query])
-            candidate_embs = self._model.encode(texts)
+            # Load the local model and compute embeddings locally in a batch
+            model = self._get_model()
+            query_emb = model.encode(query)
+            candidate_embs = model.encode(texts)
+
+            # Convert to numpy arrays for sklearn
+            query_emb = np.array([query_emb])
+            candidate_embs = np.array(candidate_embs)
 
             # Compute cosine similarity
             scores = cosine_similarity(query_emb, candidate_embs)[0]

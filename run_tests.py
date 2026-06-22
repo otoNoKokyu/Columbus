@@ -1,6 +1,6 @@
 """
-ResearchAgent — Modular Pipeline Test Runner
-=============================================
+Columbus — Modular Pipeline Test Runner
+=======================================
 
 Each function below tests ONE stage of the pipeline independently.
 Every function:
@@ -32,10 +32,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# ── Ensure ResearchAgent is importable ──────────────────────────────────
+# ── Ensure Columbus is importable ───────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Load .env from ResearchAgent root
+# Load .env from Columbus root
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
@@ -49,14 +49,14 @@ TEST_QUERY = "best practices for async Python web scraping"
 
 def get_config():
     """Return the pipeline config. Edit values here to tune the test."""
-    from ResearchAgent.pipeline.config import ResearchPipelineConfig
+    from Columbus.pipeline.config import ResearchPipelineConfig
     return ResearchPipelineConfig(
         max_rewritten_queries=3,
         search_results_per_query=5,
         top_urls_after_search=10,
         embedding_model="all-MiniLM-L6-v2",
         top_links_after_embedding=20,
-        reranker_strategy="cross-encoder",       # "cross-encoder" | "llm"
+        reranker_strategy="pinecone",
         top_links_after_rerank=5,
         recursive_crawl_depth=2,
         recursive_max_pages_per_seed=3,
@@ -128,7 +128,7 @@ def _print_summary(key_values: dict):
 def build_llm(config):
     """Build the LLM instance. Needed by: rewriter, LLM reranker."""
     _header("Building LLM")
-    from ResearchAgent.llm import get_langchain_llm
+    from Columbus.llm import get_langchain_llm
     llm = get_langchain_llm(temperature=config.llm_temperature)
     print(f"  LLM ready: {type(llm).__name__}")
     return llm
@@ -137,7 +137,7 @@ def build_llm(config):
 def build_embedding_scorer(config):
     """Build the EmbeddingScorer. Needed by: Stage 6-7, Stage 9."""
     _header("Building EmbeddingScorer")
-    from ResearchAgent.scoring.embedding_scorer import EmbeddingScorer
+    from Columbus.scoring.embedding_scorer import EmbeddingScorer
     scorer = EmbeddingScorer(model_name=config.embedding_model)
     print(f"  Scorer ready: {config.embedding_model}")
     return scorer
@@ -146,16 +146,12 @@ def build_embedding_scorer(config):
 def build_reranker(config, llm=None):
     """Build the reranker. Needed by: Stage 8."""
     _header("Building Reranker")
-    from ResearchAgent.scoring import get_reranker
-    if config.reranker_strategy == "llm":
-        assert llm is not None, "LLM reranker requires an llm instance"
-        reranker = get_reranker("llm", llm=llm, top_n=config.top_links_after_rerank)
-    else:
-        reranker = get_reranker(
-            "cross-encoder",
-            model_name=config.cross_encoder_model,
-            top_n=config.top_links_after_rerank,
-        )
+    from Columbus.scoring import get_reranker
+    reranker = get_reranker(
+        "pinecone",
+        model_name=config.pinecone_rerank_model,
+        top_n=config.top_links_after_rerank,
+    )
     print(f"  Reranker ready: {config.reranker_strategy} ({type(reranker).__name__})")
     return reranker
 
@@ -171,16 +167,17 @@ def test_1_query_rewrite(llm, query: str, config) -> list[str]:
     Input:  query string, LLM instance
     Output: list of rewritten query strings
 
-    Uses: ResearchAgent.rewriter.create_rewrite_chain
+    Uses: Columbus.rewriter.chain.create_balanced_rewrite_chain
     """
     _header("STAGE 1: Query Rewrite")
-    from ResearchAgent.rewriter import create_rewrite_chain
+    from Columbus.rewriter.chain import create_balanced_rewrite_chain
+    from Columbus.types.types import RewriterInput
 
-    chain = create_rewrite_chain(llm, max_queries=config.max_rewritten_queries)
-    queries = chain.invoke(
-        {"question": query},
-        config={"run_name": "ResearchAgent:QueryRewrite"},
-    )
+    chain = create_balanced_rewrite_chain(llm)
+    query_obj = chain.invoke(RewriterInput(query=query))
+    
+    # Extract the 5 string queries from the Pydantic object
+    queries = [v for k, v in query_obj.model_dump().items() if isinstance(v, str) and v.strip()]
 
     _print_summary({
         "Original query": query,
@@ -202,10 +199,10 @@ def test_2_3_search(queries: list[str], config) -> list[dict]:
     Input:  list of search queries
     Output: list of search result dicts [{title, url, snippet, source_query}]
 
-    Uses: ResearchAgent.search.fan_out_search
+    Uses: Columbus.search.fan_out_search
     """
     _header("STAGE 2-3: Fan-Out Search + Dedup")
-    from ResearchAgent.search import fan_out_search
+    from Columbus.search import fan_out_search
 
     results = asyncio.run(fan_out_search(
         queries=queries,
@@ -233,10 +230,10 @@ def test_4_firecrawl(urls: list[str], config) -> list[dict]:
     Input:  list of URL strings
     Output: list of dicts [{url, markdown, error?}]
 
-    Uses: ResearchAgent.crawl.firecrawl_engine.scrape_urls_for_markdown
+    Uses: Columbus.crawl.firecrawl_engine.scrape_urls_for_markdown
     """
     _header("STAGE 4: Firecrawl Scrape → Markdown")
-    from ResearchAgent.crawl.firecrawl_engine import scrape_urls_for_markdown
+    from Columbus.crawl.firecrawl_engine import scrape_urls_for_markdown
 
     pages = asyncio.run(scrape_urls_for_markdown(
         urls=urls,
@@ -265,10 +262,10 @@ def test_5_link_extraction(pages: list[dict]) -> list[dict]:
     Input:  list of crawled page dicts [{url, markdown, error?}]
     Output: list of link dicts [{url, anchor_text, context, source_url}]
 
-    Uses: ResearchAgent.crawl.link_extractor.extract_links_from_markdown
+    Uses: Columbus.crawl.link_extractor.extract_links_from_markdown
     """
     _header("STAGE 5: Link Extraction")
-    from ResearchAgent.crawl.link_extractor import extract_links_from_markdown
+    from Columbus.crawl.link_extractor import extract_links_from_markdown
 
     all_links = []
     seen_urls = set()
@@ -307,7 +304,7 @@ def test_6_7_embedding_score(
     Input:  EmbeddingScorer, query string, list of link dicts
     Output: top N link dicts sorted by embedding_score descending
 
-    Uses: ResearchAgent.scoring.embedding_scorer.EmbeddingScorer
+    Uses: Columbus.scoring.embedding_scorer.EmbeddingScorer
     """
     _header("STAGE 6-7: Embedding Scoring → Top N")
 
@@ -343,7 +340,7 @@ def test_8_rerank(reranker, query: str, candidates: list[dict], config) -> list[
     Input:  BaseReranker, query string, list of scored link dicts
     Output: top K link dicts sorted by rerank_score descending
 
-    Uses: ResearchAgent.scoring.{CrossEncoderReranker | LLMRelevanceReranker}
+    Uses: Columbus.scoring.{CrossEncoderReranker | LLMRelevanceReranker}
     """
     _header("STAGE 8: Rerank → Top K")
 
@@ -382,10 +379,10 @@ def test_9_recursive_crawl(
     Input:  EmbeddingScorer, query string, list of top-ranked link dicts
     Output: list of tree nodes [{url, depth, markdown, children: [...]}]
 
-    Uses: ResearchAgent.crawl.recursive_crawler.recursive_crawl
+    Uses: Columbus.crawl.recursive_crawler.recursive_crawl
     """
     _header("STAGE 9: Recursive Crawl (depth=2)")
-    from ResearchAgent.crawl.recursive_crawler import recursive_crawl
+    from Columbus.crawl.recursive_crawler import recursive_crawl
 
     seed_urls = [link.get("url", "") for link in seed_links]
 
@@ -438,11 +435,11 @@ def test_full_pipeline(query: str, config):
     Run the FULL pipeline as a single LCEL chain via the factory.
     This is the "production" invocation path.
 
-    Uses: ResearchAgent.pipeline.factory.create_research_chain
+    Uses: Columbus.pipeline.factory.create_research_chain
     """
     _header("FULL PIPELINE (via factory)")
-    from ResearchAgent.pipeline.factory import create_research_chain
-    from ResearchAgent.utils.callbacks import TokenAccumulatorCallbackHandler
+    from Columbus.pipeline.factory import create_research_chain
+    from Columbus.utils.callbacks import TokenAccumulatorCallbackHandler
 
     chain = create_research_chain(config)
     token_cb = TokenAccumulatorCallbackHandler()

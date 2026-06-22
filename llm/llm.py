@@ -12,7 +12,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Load .env from ResearchAgent root
+# Load .env from Columbus root
 _dotenv_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=_dotenv_path)
 
@@ -28,7 +28,7 @@ def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None):
     if provider == "bedrock":
         import boto3
         from langchain_aws import ChatBedrockConverse
-        from ResearchAgent.utils.callbacks import TokenMeasurerCallbackHandler
+        from ..utils.callbacks import TokenMeasurerCallbackHandler
 
         model = os.getenv("BEDROCK_MODEL", "deepseek.v3-v1:0")
         region_name = os.getenv("AWS_DEFAULT_REGION", "ap-southeast-2")
@@ -55,7 +55,7 @@ def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None):
 
     elif provider == "genai":
         from langchain_google_genai import ChatGoogleGenerativeAI
-        from ResearchAgent.utils.callbacks import TokenMeasurerCallbackHandler
+        from ..utils.callbacks import TokenMeasurerCallbackHandler
 
         api_key = os.getenv("GOOGLE_GENAI_API_KEY")
         model = os.getenv("GENAI_MODEL", "gemini-2.5-flash")
@@ -66,26 +66,5 @@ def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None):
             temperature=temperature,
             callbacks=[TokenMeasurerCallbackHandler()],
         )
-
-    elif provider == "openrouter":
-        from langchain_openai import ChatOpenAI
-        from ResearchAgent.utils.callbacks import TokenMeasurerCallbackHandler
-
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
-        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-        if base_url.endswith("/chat/completions"):
-            base_url = base_url[:-17]
-        elif base_url.endswith("/chat"):
-            base_url = base_url[:-5]
-        logger.info("OpenRouter LLM: model=%s", model)
-        return ChatOpenAI(
-            model=model,
-            openai_api_key=api_key,
-            openai_api_base=base_url,
-            temperature=temperature,
-            callbacks=[TokenMeasurerCallbackHandler()],
-        )
-
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

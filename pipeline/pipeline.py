@@ -47,13 +47,13 @@ def build_research_chain(
         A single LCEL Runnable that executes the full 9-stage pipeline.
     """
     # ── Build stage callables ──────────────────────────────────────
-    rewrite       = RunnableLambda(build_rewrite_stage(rewrite_chain))
-    search        = RunnableLambda(build_search_stage(config))
-    firecrawl     = RunnableLambda(build_firecrawl_stage(config))
-    link_extract  = RunnableLambda(build_link_extraction_stage())
-    emb_score     = RunnableLambda(build_embedding_score_stage(embedding_scorer, config))
-    rerank        = RunnableLambda(build_rerank_stage(reranker, config))
-    recursive     = RunnableLambda(build_recursive_crawl_stage(embedding_scorer, config))
+    rewrite       = RunnableLambda(build_rewrite_stage(rewrite_chain)).with_config({"run_name": "Stage1:Rewrite"})
+    search        = RunnableLambda(build_search_stage(config)).with_config({"run_name": "Stage2:Search"})
+    firecrawl     = RunnableLambda(build_firecrawl_stage(config)).with_config({"run_name": "Stage4:Firecrawl"})
+    link_extract  = RunnableLambda(build_link_extraction_stage()).with_config({"run_name": "Stage5:LinkExtraction"})
+    emb_score     = RunnableLambda(build_embedding_score_stage(embedding_scorer, config)).with_config({"run_name": "Stage6:EmbeddingScore"})
+    rerank        = RunnableLambda(build_rerank_stage(reranker, config)).with_config({"run_name": "Stage8:Rerank"})
+    recursive     = RunnableLambda(build_recursive_crawl_stage(embedding_scorer, config)).with_config({"run_name": "Stage9:RecursiveCrawl"})
 
     logger.info("Research pipeline chain assembled with %d stages", 7)
 
