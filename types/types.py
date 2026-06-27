@@ -20,6 +20,7 @@ class CrawlResult(BaseModel):
     depth: int
     score: float
     content: str
+    token_count: Optional[int] = None
     
 class PerspectiveResult(BaseModel):
     bias_type: str

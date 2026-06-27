@@ -86,7 +86,7 @@ class PineconeReranker(BaseReranker):
 
         batch_size = 100
         try:
-            logger.info(
+            logger.debug(
                 "Calling Pinecone Rerank API for %d candidates in batches of %d using model '%s'",
                 len(candidates),
                 batch_size,
@@ -126,7 +126,7 @@ class PineconeReranker(BaseReranker):
             reverse=True,
         )
 
-        logger.info(
+        logger.debug(
             "Pinecone Rerank success: %d candidates -> top %d (highest score=%.4f)",
             len(candidates),
             min(top_n, len(ranked)),
@@ -140,6 +140,6 @@ class PineconeReranker(BaseReranker):
             text = f"{anchor} {context}".strip()
             words = text.split()
             short_text = " ".join(words[:10]) + ("..." if len(words) > 10 else "")
-            logger.info(f"Reranked Rank {i+1} | Score: {res.get('rerank_score', -999.0):.4f} | URL: {res.get('url')} | Context: '{short_text}'")
+            logger.debug(f"Reranked Rank {i+1} | Score: {res.get('rerank_score', -999.0):.4f} | URL: {res.get('url')} | Context: '{short_text}'")
 
         return ranked[:top_n]

@@ -192,6 +192,7 @@ class ExaSearchClient(BaseSearchClient):
                     "url": url,
                     "publishedDate": getattr(item, "published_date", "") or "",
                     "snippet": snippet,
+                    "highlights": getattr(item, "highlights", []) or [],
                     "dss": subpages_list, # Extracted nested subpages array mapped to your custom key
                     "score": getattr(item, "score", None),
                     "highlightScore": getattr(item, "highlight_scores", None)

@@ -25,3 +25,8 @@ python-dotenv==1.2.2
 boto3==1.43.31
 rich==15.0.0
 pinecone>=9.1.0
+
+# API / Web Server
+fastapi
+uvicorn
+sse-starlette

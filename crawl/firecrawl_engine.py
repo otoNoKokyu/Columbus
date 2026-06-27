@@ -240,13 +240,29 @@ async def execute_crawl(config: FirecrawlConfiguration):
     return results
 
 
-async def scrape_urls_for_markdown_crawl4ai(urls: list[str]) -> list[dict]:
+async def scrape_urls_for_markdown_crawl4ai(
+    urls: list[str],
+    skip_links: bool = True,
+    academic_citations: bool = False
+) -> list[dict]:
     """Scrapes a list of URLs concurrently using Crawl4AI."""
     from crawl4ai import AsyncWebCrawler, CacheMode
     from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
+    from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
     
+    # Configure Markdown generator
+    options = {}
+    if academic_citations:
+        options["citations"] = True
+    elif skip_links:
+        options["ignore_links"] = True
+        
+    md_generator = DefaultMarkdownGenerator(options=options)
     browser_config = BrowserConfig(headless=True, enable_stealth=True)
-    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        markdown_generator=md_generator
+    )
     
     results = []
     urls_to_scrape = []
@@ -272,7 +288,10 @@ async def scrape_urls_for_markdown_crawl4ai(urls: list[str]) -> list[dict]:
                 if res.success:
                     markdown = ""
                     if res.markdown:
-                        markdown = res.markdown.fit_markdown or res.markdown.raw_markdown or ""
+                        if academic_citations and getattr(res.markdown, "markdown_with_citations", None):
+                            markdown = res.markdown.markdown_with_citations
+                        else:
+                            markdown = res.markdown.fit_markdown or res.markdown.raw_markdown or ""
                     html = res.html or ""
                     filtered_results[url] = {"url": url, "markdown": markdown, "html": html}
                     logger.info("crawl4ai: Successfully scraped %s (%d chars)", url, len(markdown))
@@ -297,7 +316,10 @@ async def scrape_urls_for_markdown_crawl4ai(urls: list[str]) -> list[dict]:
                         if res.success:
                             markdown = ""
                             if res.markdown:
-                                markdown = res.markdown.fit_markdown or res.markdown.raw_markdown or ""
+                                if academic_citations and getattr(res.markdown, "markdown_with_citations", None):
+                                    markdown = res.markdown.markdown_with_citations
+                                else:
+                                    markdown = res.markdown.fit_markdown or res.markdown.raw_markdown or ""
                             html = res.html or ""
                             filtered_results[url] = {"url": url, "markdown": markdown, "html": html}
                         else:
@@ -317,6 +339,8 @@ async def scrape_urls_for_markdown(
     api_key: str | None = None,
     rate_limiter: RateLimiter | None = None,
     only_main_content: bool = True,
+    skip_links: bool = True,
+    academic_citations: bool = False,
 ) -> list[dict]:
     """Scrape a list of URLs and extract markdown content.
 
@@ -334,7 +358,13 @@ async def scrape_urls_for_markdown(
     """
     strategy = os.environ.get("CRAWL_STRATEGY", "firecrawl").lower()
     if strategy == "crawl4ai":
-        return await scrape_urls_for_markdown_crawl4ai(urls)
+        return await scrape_urls_for_markdown_crawl4ai(
+            urls, 
+            skip_links=skip_links, 
+            academic_citations=academic_citations
+        )
+    if academic_citations:
+        logger.warning("scrape_urls_for_markdown: Academic citations are not supported by the Firecrawl strategy.")
     api_key = api_key or os.environ.get("FIRECRAWL_API_KEY")
     if not api_key:
         logger.error("scrape_urls_for_markdown: No Firecrawl API key available")
@@ -360,9 +390,10 @@ async def scrape_urls_for_markdown(
                     app.scrape_url,
                     url,
                     params={
-                        "formats": ["markdown", "html"],
-                        "pageOptions": {"includeHtml": True},
-                        "onlyMainContent": only_main_content,
+                        "formats": ["markdown"],
+                        "pageOptions": {
+                            "onlyMainContent": only_main_content,
+                        },
                     },
                 )
                 markdown = ""
@@ -370,6 +401,9 @@ async def scrape_urls_for_markdown(
                 if isinstance(result, dict):
                     markdown = result.get("markdown", "")
                     html = result.get("html", "")
+                    if skip_links and markdown:
+                        import re
+                        markdown = re.sub(r'(?<!\!)\[([^\]\n]+)\]\([^)]+\)', r'\1', markdown)
                 logger.info(
                     "scrape_urls_for_markdown: Got %d markdown chars and %d html chars from %s",
                     len(markdown), len(html), url[:60],

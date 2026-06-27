@@ -16,6 +16,17 @@ from typing import Any, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 
+def get_token_count(text: str) -> int:
+    if not text:
+        return 0
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text, disallowed_special=()))
+    except Exception:
+        return len(text.split())
+
+
 async def recursive_crawl(
     seed_urls: List[str],
     query: str,
@@ -263,6 +274,9 @@ async def frontier_balanced_crawl(
     score_threshold: float = 0.7,
     api_key: Optional[str] = None,
     rate_limiter = None,
+    return_markdown: bool = False,
+    academic_citations: bool = False,
+    skip_links: bool = True,
 ) -> List[Dict[str, Any]]:
     """Crawls URLs using a level-by-level BFS strategy.
 
@@ -289,7 +303,7 @@ async def frontier_balanced_crawl(
             url_clean = parsed.geturl()
             
             if await is_unwanted_url_async(url_clean):
-                logger.info(f"[Level BFS Crawl] Skipping unwanted seed candidate URL: '{url_clean}'")
+                logger.debug(f"[Crawl Status] Skipping unwanted seed candidate URL: '{url_clean}'")
                 continue
             
             current_level_candidates.append({
@@ -309,13 +323,13 @@ async def frontier_balanced_crawl(
     )
 
     logger.info(
-        "[Level BFS Crawl] Initialized with %d seed candidates for query '%s'",
-        len(current_level_candidates), query
+        "[Crawl Status] Initialized BFS crawl for query '%s' with %d seed candidates.",
+        query, len(current_level_candidates)
     )
 
     for depth in range(max_depth + 1):
         if not current_level_candidates:
-            logger.info(f"[Level BFS Crawl] No candidates left at depth {depth}. Terminating early.")
+            logger.info(f"[Crawl Status] Depth {depth}: No candidates left. Terminating crawl.")
             break
 
         limit = pages_per_level[depth] if depth < len(pages_per_level) else 1
@@ -329,7 +343,7 @@ async def frontier_balanced_crawl(
                     unvisited_candidates.append(cand)
 
         if not unvisited_candidates:
-            logger.warning(f"[Level BFS Crawl] No unvisited candidates at depth {depth} met the score threshold >= {score_threshold}. Skipping level.")
+            logger.warning(f"[Crawl Status] Depth {depth}: No candidates met score threshold >= {score_threshold}. Skipping level.")
             break
 
         # Scrape up to 'limit' pages at this level
@@ -337,17 +351,19 @@ async def frontier_balanced_crawl(
         urls_to_scrape = [cand["url"] for cand in to_scrape]
 
         logger.info(
-            "[Level BFS Crawl] Depth %d | Scraping %d URLs: %s",
-            depth, len(urls_to_scrape), urls_to_scrape
+            "[Crawl Links Fetched] Depth %d | Scraped URLs: %s",
+            depth, urls_to_scrape
         )
         for u in urls_to_scrape:
-            logger.info(f"Crawling URL: '{u}' at depth {depth}")
+            logger.debug(f"Crawling URL: '{u}' at depth {depth}")
 
         pages = await scrape_urls_for_markdown(
             urls=urls_to_scrape,
             api_key=api_key,
             rate_limiter=rate_limiter,
             only_main_content=True,
+            skip_links=skip_links,
+            academic_citations=academic_citations,
         )
 
         next_level_raw_links: List[Dict[str, Any]] = []
@@ -357,19 +373,28 @@ async def frontier_balanced_crawl(
             visited.add(url)
 
             if page.get("error"):
-                logger.warning("[Level BFS Crawl] Failed to scrape %s: %s", url, page.get("error"))
+                logger.warning("[Crawl Status] Failed to scrape %s: %s", url, page.get("error"))
                 continue
 
             markdown = page.get("markdown", "")
             html = page.get("html", "")
             
             main_content = ""
-            if html:
-                extracted = trafilatura.extract(html)
-                if extracted:
-                    main_content = extracted
-            if not main_content and markdown:
+            if return_markdown and markdown:
                 main_content = markdown
+            else:
+                if html:
+                    extracted = trafilatura.extract(html)
+                    if extracted:
+                        main_content = extracted
+                if not main_content and markdown:
+                    main_content = markdown
+
+            token_count = get_token_count(main_content)
+            logger.info(
+                "[Crawl Status] Scraped URL '%s' at depth %d: Content Length = %d chars, Token Count = %d",
+                url, depth, len(main_content), token_count
+            )
 
             scraped_pages.append({
                 "url": url,
@@ -377,6 +402,7 @@ async def frontier_balanced_crawl(
                 "content": main_content,
                 "score": cand.get("rerank_score") or 0.0,
                 "depth": depth,
+                "token_count": token_count
             })
 
             # If we haven't hit the max depth limit, extract links for the next level
@@ -403,7 +429,7 @@ async def frontier_balanced_crawl(
                     })
 
         logger.info(
-            "[Level BFS Crawl] Depth %d scraped. Discovered %d total links for the next level.",
+            "[Crawl Status] Depth %d scraped. Discovered %d total links for the next level.",
             depth, len(next_level_raw_links)
         )
 
@@ -417,8 +443,8 @@ async def frontier_balanced_crawl(
 
         # Rerank and sort next level candidates
         if depth < max_depth and next_level_candidates_dedup:
-            logger.info(
-                "[Level BFS Crawl] Reranking %d unique unvisited links for depth %d against query: '%s'...",
+            logger.debug(
+                "[Crawl Status] Reranking %d unique unvisited links for depth %d against query: '%s'...",
                 len(next_level_candidates_dedup), depth + 1, query
             )
             
@@ -447,7 +473,7 @@ async def frontier_balanced_crawl(
                     cand["rerank_score"] = score_map.get(cand["url"], -999.0)
 
             except Exception as e:
-                logger.error("[Level BFS Crawl] Pinecone reranking failed: %s", e)
+                logger.error("[Crawl Status] Pinecone reranking failed: %s", e)
                 for cand in next_level_candidates_dedup:
                     cand["rerank_score"] = 0.0
 
@@ -468,7 +494,7 @@ async def frontier_balanced_crawl(
     )
 
     logger.info(
-        "[Level BFS Crawl] Crawl complete for query '%s'. Visited %d pages total.",
+        "[Crawl Status] Crawl complete for query '%s'. Visited %d pages total.",
         query, len(scraped_pages)
     )
     
