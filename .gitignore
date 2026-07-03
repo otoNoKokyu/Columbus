@@ -5,7 +5,11 @@ __pycache__/
 
 # C extensions
 *.so
-
+frontend/
+assets/
+.agents/
+tests/
+test/
 # Distribution / packaging
 .Python
 build/

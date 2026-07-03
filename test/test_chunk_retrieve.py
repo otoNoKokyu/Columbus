@@ -42,7 +42,7 @@ async def test_chunk_and_retrieve_flow():
     
     # 3. Test Chunker directly first
     print("\n1. Testing SemanticChunker directly on supporting content...")
-    chunker = SemanticChunker(hf_token=hf_token)
+    chunker = SemanticChunker(hf_token=hf_token, min_words=0)
     chunks = await chunker.chunk(supporting_content[0], min_chunk_size=100)
     print(f"✔ Successfully split text into {len(chunks)} semantic chunks:")
     for idx, c in enumerate(chunks):
@@ -59,7 +59,8 @@ async def test_chunk_and_retrieve_flow():
             index_name="columbus-test-index",
             top_k=2,
             pinecone_api_key=pinecone_api_key,
-            hf_token=hf_token
+            hf_token=hf_token,
+            min_words=0
         )
         
         print("\n--- Semantic Retrieval Results ---")

@@ -277,6 +277,7 @@ async def frontier_balanced_crawl(
     return_markdown: bool = False,
     academic_citations: bool = False,
     skip_links: bool = True,
+    visited: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Crawls URLs using a level-by-level BFS strategy.
 
@@ -290,7 +291,8 @@ async def frontier_balanced_crawl(
     from urllib.parse import urlparse
     import trafilatura
 
-    visited: Set[str] = set()
+    if visited is None:
+        visited = set()
     scraped_pages: List[Dict[str, Any]] = []
 
     # Initialize current level candidates with seed candidates

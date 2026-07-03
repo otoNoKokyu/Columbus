@@ -39,7 +39,7 @@ def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None):
 
         logger.info("Bedrock LLM: model=%s, region=%s", model, region_name)
         return ChatBedrockConverse(
-            model_id=model,
+            model=model,
             client=client,
             temperature=temperature,
             callbacks=[TokenMeasurerCallbackHandler()],
@@ -66,5 +66,20 @@ def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None):
             temperature=temperature,
             callbacks=[TokenMeasurerCallbackHandler()],
         )
+    elif provider == 'openrouter':
+        from langchain_openrouter import ChatOpenRouter
+        from ..utils.callbacks import TokenMeasurerCallbackHandler
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+        logger.info("OpenRouter LLM: model=%s", model)
+        return ChatOpenRouter(
+            model=model,
+            api_key=api_key,
+            temperature=temperature,
+            callbacks=[TokenMeasurerCallbackHandler()],
+            reasoning={"effort": "high", "summary": "auto"},
+
+        )
+
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

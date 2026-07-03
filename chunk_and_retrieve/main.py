@@ -1,78 +1,27 @@
+from langchain_huggingface import HuggingFaceEmbeddings
 import os
 import re
 import asyncio
 import hashlib
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from pinecone import Pinecone, ServerlessSpec
 from langchain_core.embeddings import Embeddings
 
-try:
-    from langchain_huggingface import HuggingFaceEmbeddings
-except ImportError:
-    try:
-        from langchain_community.embeddings import HuggingFaceEmbeddings
-    except ImportError:
-        from langchain.embeddings import HuggingFaceEmbeddings
 
-class HFInferenceEmbeddings(HuggingFaceEmbeddings):
-    """LangChain-compatible local HuggingFaceEmbeddings wrapper."""
+
+def get_embeddings(
+    source: str = "local",
+    model_name: str = "BAAI/bge-base-en-v1.5"
+) -> Embeddings:
+    """Factory function to retrieve LangChain-compatible embeddings.
     
-    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", hf_token: str | None = None):
-        super().__init__(model_name=model_name)
-
-
-
-class PineconeHostedEmbeddings:
-    """Wrapper around Pinecone's Hosted Inference Embeddings."""
-    
-    def __init__(self, model_name: str = "multilingual-e5-large", pinecone_api_key: str | None = None):
-        self.model_name = model_name
-        self.api_key = pinecone_api_key or os.environ.get("PINECONE_API_KEY")
-        if not self.api_key:
-            raise ValueError("PINECONE_API_KEY is required for PineconeHostedEmbeddings.")
-        self.pc = Pinecone(api_key=self.api_key)
-
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        if not texts:
-            return []
-        batch_size = 96
-        embeddings = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            res = self.pc.inference.embed(
-                model=self.model_name,
-                inputs=batch,
-                parameters={"input_type": "passage", "truncate": "END"}
-            )
-            for item in res.data:
-                embeddings.append(item.values)
-        return embeddings
-
-    def embed_query(self, text: str) -> List[float]:
-        res = self.pc.inference.embed(
-            model=self.model_name,
-            inputs=[text],
-            parameters={"input_type": "query", "truncate": "END"}
-        )
-        return res.data[0].values
-
-
-def get_index_embed_config(pc: Pinecone, index_name: str) -> Tuple[str | None, int | None]:
-    """Retrieves the integrated embedding model and dimension for a Pinecone index if configured."""
-    try:
-        existing_indexes = [idx.name for idx in pc.list_indexes()]
-        if index_name in existing_indexes:
-            desc = pc.describe_index(index_name)
-            if hasattr(desc, "embed") and desc.embed is not None:
-                model = getattr(desc.embed, "model", None)
-                dim = getattr(desc.embed, "dimension", None)
-                return model, dim
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"Failed to fetch index embed config for '{index_name}': {e}")
-    return None, None
+    Supports: 'local' (HuggingFaceEmbeddings).
+    """
+    if source == "local":
+        return HuggingFaceEmbeddings(model_name=model_name)
+    else:
+        raise ValueError(f"Unknown embedding source: {source}")
 
 
 class BaseChunker:
@@ -82,57 +31,24 @@ class BaseChunker:
         self, 
         model_name: str = "BAAI/bge-base-en-v1.5", 
         hf_token: str | None = None,
-        embedding_source: str = "local",
-        pinecone_api_key: str | None = None,
-        index_name: str | None = None
+        min_words: int = 100,
+        embeddings: Embeddings | None = None,
+        **kwargs
     ):
         self._model_name = model_name
         self._hf_token = hf_token
-        self.embedding_source = embedding_source
-        self.pinecone_api_key = pinecone_api_key
-        self.index_name = index_name
+        self.min_words = min_words
+        self._dimension = 768
         
-        if embedding_source == "integrated":
-            # If integrated, try to retrieve the model name from the index description dynamically
-            resolved_model = None
-            resolved_dim = 1024
-            
-            pc_key = pinecone_api_key or os.environ.get("PINECONE_API_KEY")
-            if pc_key and index_name:
-                try:
-                    pc = Pinecone(api_key=pc_key)
-                    resolved_model, resolved_dim = get_index_embed_config(pc, index_name)
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).warning(f"Could not retrieve embed config from index '{index_name}': {e}")
-            
-            if not resolved_model:
-                resolved_model = "llama-text-embed-v2" if model_name == "BAAI/bge-base-en-v1.5" else model_name
-                resolved_dim = 1024
-                
-            self._model_name = resolved_model
-            self._dimension = resolved_dim
-            self._embeddings = PineconeHostedEmbeddings(model_name=resolved_model, pinecone_api_key=pinecone_api_key)
-            
-        elif embedding_source == "pinecone":
-            model = "multilingual-e5-large" if model_name == "BAAI/bge-base-en-v1.5" else model_name
-            self._model_name = model
-            self._dimension = 1024
-            self._embeddings = PineconeHostedEmbeddings(model_name=model, pinecone_api_key=pinecone_api_key)
+        if embeddings is not None:
+            self._embeddings = embeddings
         else:
-            self._model_name = model_name
-            self._dimension = 768
-            self._embeddings = HFInferenceEmbeddings(self._model_name, self._hf_token)
+            self._embeddings = get_embeddings(source="local", model_name=self._model_name)
 
     @property
     def dimension(self) -> int:
         """Return the dimension of the embedding vectors produced by this chunker."""
-        if hasattr(self, "_dimension") and self._dimension is not None:
-            return self._dimension
-        if self.embedding_source in ("pinecone", "integrated"):
-            return 1024
-        else:
-            return 768
+        return self._dimension
 
     async def embed_sentences(self, sentences: List[str]) -> List[List[float]]:
         """Concurrency wrapper for embedding list of texts asynchronously."""
@@ -147,8 +63,8 @@ class BaseChunker:
 class SemanticChunker(BaseChunker):
     """Wrapper around LangChain's SemanticChunker using HFInferenceEmbeddings."""
     
-    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", hf_token: str | None = None, min_chunk_size: int = 150, percentile_threshold: float = 20.0, embedding_source: str = "local", pinecone_api_key: str | None = None, index_name: str | None = None):
-        super().__init__(model_name=model_name, hf_token=hf_token, embedding_source=embedding_source, pinecone_api_key=pinecone_api_key, index_name=index_name)
+    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", hf_token: str | None = None, min_chunk_size: int = 150, percentile_threshold: float = 20.0, min_words: int = 100, embeddings: Embeddings | None = None, **kwargs):
+        super().__init__(model_name=model_name, hf_token=hf_token, min_words=min_words, embeddings=embeddings)
         self.min_chunk_size = min_chunk_size
         self.percentile_threshold = percentile_threshold
 
@@ -171,14 +87,16 @@ class SemanticChunker(BaseChunker):
         
         loop = asyncio.get_running_loop()
         chunks = await loop.run_in_executor(None, lambda: text_splitter.split_text(text))
+        if self.min_words > 0:
+            chunks = [c for c in chunks if len(c.split()) >= self.min_words]
         return chunks
 
 
 class RecursiveChunker(BaseChunker):
     """Chunks document text recursively based on word count, ensuring each chunk is at least min_chunk_size words."""
 
-    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", hf_token: str | None = None, min_chunk_size: int = 500, chunk_overlap: int = 50, embedding_source: str = "local", pinecone_api_key: str | None = None, index_name: str | None = None):
-        super().__init__(model_name=model_name, hf_token=hf_token, embedding_source=embedding_source, pinecone_api_key=pinecone_api_key, index_name=index_name)
+    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", hf_token: str | None = None, min_chunk_size: int = 500, chunk_overlap: int = 50, min_words: int = 100, embeddings: Embeddings | None = None, **kwargs):
+        super().__init__(model_name=model_name, hf_token=hf_token, min_words=min_words, embeddings=embeddings)
         self.min_chunk_size = min_chunk_size
         self.chunk_overlap = chunk_overlap
 
@@ -234,41 +152,129 @@ class RecursiveChunker(BaseChunker):
             else:
                 merged_chunks.append(remaining_text)
                 
+        if self.min_words > 0:
+            merged_chunks = [c for c in merged_chunks if len(c.split()) >= self.min_words]
         return merged_chunks
+
+
+class MarkdownStructuralChunker(BaseChunker):
+    """Chunks document text using markdown headers and falls back to recursive splitting."""
+
+    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", hf_token: str | None = None, min_chunk_size: int = 350, chunk_overlap: int = 50, min_words: int = 100, embeddings: Embeddings | None = None, **kwargs):
+        super().__init__(model_name=model_name, hf_token=hf_token, min_words=min_words, embeddings=embeddings)
+        self.min_chunk_size = min_chunk_size
+        self.chunk_overlap = chunk_overlap
+
+    async def chunk(self, text: str) -> List[str]:
+        from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+        
+        headers_to_split_on = [
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+        ]
+        
+        unwanted_headers = {
+            "references", "bibliography", "sources", "further reading", "related articles", 
+            "see also", "external links", "navigation", "table of contents", "footer", 
+            "header", "copyright", "privacy policy", "terms of service", "cookie policy", 
+            "comments", "advertisements", "newsletter signup", "share buttons", "author bio", 
+            "social links", "tags", "categories", "breadcrumbs", "previous article", 
+            "previous/next article", "next article", "recent posts", "popular posts", "recommended reading"
+        }
+        
+        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=False)
+        md_header_splits = markdown_splitter.split_text(text)
+        
+        filtered_splits = []
+        for doc in md_header_splits:
+            skip = False
+            for v in doc.metadata.values():
+                if v.lower().strip() in unwanted_headers:
+                    skip = True
+                    break
+            if not skip:
+                filtered_splits.append(doc.page_content)
+
+        # Recursive fallback for large chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.min_chunk_size, 
+            chunk_overlap=self.chunk_overlap,
+            length_function=lambda x: len(x.split()),
+        )
+        
+        loop = asyncio.get_running_loop()
+        final_chunks = []
+        
+        def process_splits(splits):
+            res = []
+            for split_text in splits:
+                word_count = len(split_text.split())
+                if word_count > self.min_chunk_size:
+                    sub_chunks = text_splitter.split_text(split_text)
+                    res.extend([c for c in sub_chunks if len(c.split()) >= 100])
+                elif word_count >= 100:
+                    res.append(split_text)
+            return res
+            
+        final_chunks = await loop.run_in_executor(None, process_splits, filtered_splits)
+        if self.min_words > 0:
+            final_chunks = [c for c in final_chunks if len(c.split()) >= self.min_words]
+        return final_chunks
 
 
 def get_chunker(
     strategy: str = "semantic",
     model_name: str = "BAAI/bge-base-en-v1.5",
     hf_token: str | None = None,
-    embedding_source: str = "local",
-    pinecone_api_key: str | None = None,
-    index_name: str | None = None,
+    embeddings: Embeddings | None = None,
     **kwargs
 ) -> BaseChunker:
     """Factory function to instantiate the requested chunker strategy."""
+    min_words = kwargs.get("min_words", 100)
+    kw = kwargs.copy()
+    kw.pop("min_words", None)
+    kw.pop("embeddings", None)
+    kw.pop("model_name", None)
+    kw.pop("hf_token", None)
+    
     if strategy == "recursive":
-        min_sz = kwargs.get("min_chunk_size")
+        min_sz = kw.pop("min_chunk_size", None)
         if min_sz is None:
-            min_sz = kwargs.get("chunk_size", 500)
+            min_sz = kw.pop("chunk_size", 500)
+        overlap = kw.pop("chunk_overlap", 50)
         return RecursiveChunker(
             model_name=model_name,
             hf_token=hf_token,
             min_chunk_size=min_sz,
-            chunk_overlap=kwargs.get("chunk_overlap", 50),
-            embedding_source=embedding_source,
-            pinecone_api_key=pinecone_api_key,
-            index_name=index_name
+            chunk_overlap=overlap,
+            min_words=min_words,
+            embeddings=embeddings,
+            **kw
         )
     elif strategy == "semantic":
+        min_sz = kw.pop("min_chunk_size", 150)
+        pct = kw.pop("percentile_threshold", 20.0)
         return SemanticChunker(
             model_name=model_name,
             hf_token=hf_token,
-            min_chunk_size=kwargs.get("min_chunk_size", 150),
-            percentile_threshold=kwargs.get("percentile_threshold", 20.0),
-            embedding_source=embedding_source,
-            pinecone_api_key=pinecone_api_key,
-            index_name=index_name
+            min_chunk_size=min_sz,
+            percentile_threshold=pct,
+            min_words=min_words,
+            embeddings=embeddings,
+            **kw
+        )
+    elif strategy == "structural":
+        min_sz = kw.pop("min_chunk_size", 350)
+        overlap = kw.pop("chunk_overlap", 50)
+        return MarkdownStructuralChunker(
+            model_name=model_name,
+            hf_token=hf_token,
+            min_chunk_size=min_sz,
+            chunk_overlap=overlap,
+            min_words=min_words,
+            embeddings=embeddings,
+            **kw
         )
     else:
         raise ValueError(f"Unknown chunking strategy: {strategy}")
@@ -294,84 +300,23 @@ def clean_chunk_text(text: str) -> str:
     return text
 
 
-def get_or_create_index(
-    pc: Pinecone, 
-    index_name: str, 
-    dimension: int = 768, 
-    embed_config: Dict[str, Any] | None = None
-) -> Any:
-    """Retrieves or creates a Serverless AWS Pinecone index."""
-    # Fetch list of existing index names
-    existing_indexes = [idx.name for idx in pc.list_indexes()]
-    if index_name not in existing_indexes:
-        if embed_config:
-            pc.create_index_for_model(
-                name=index_name,
-                cloud="aws",
-                region="us-east-1",
-                embed=embed_config
-            )
-        else:
-            pc.create_index(
-                name=index_name,
-                dimension=dimension,
-                metric="cosine",
-                spec=ServerlessSpec(
-                    cloud="aws",
-                    region="us-east-1"
-                )
-            )
-    return pc.Index(index_name)
-
-
-def maximal_marginal_relevance(
-    query_embedding: np.ndarray,
-    embedding_list: List[List[float]],
-    lambda_mult: float = 0.5,
-    k: int = 4
-) -> List[int]:
-    """Calculate maximal marginal relevance to optimize for similarity to query and diversity among selected documents."""
-    if min(k, len(embedding_list)) <= 0:
-        return []
-    if query_embedding.ndim == 1:
-        query_embedding = np.expand_dims(query_embedding, axis=0)
-    similarity_to_query = cosine_similarity(query_embedding, embedding_list)[0]
-    most_recent = np.argmax(similarity_to_query)
-    idxs = [int(most_recent)]
-    selected = np.array([embedding_list[most_recent]])
-    while len(idxs) < min(k, len(embedding_list)):
-        best_score = -np.inf
-        idx_to_add = -1
-        similarity_to_selected = cosine_similarity(embedding_list, selected)
-        for i, query_score in enumerate(similarity_to_query):
-            if i in idxs:
-                continue
-            item_score = lambda_mult * query_score - (1 - lambda_mult) * np.max(similarity_to_selected[i])
-            if item_score > best_score:
-                best_score = item_score
-                idx_to_add = i
-        idxs.append(idx_to_add)
-        selected = np.append(selected, [embedding_list[idx_to_add]], axis=0)
-    return idxs
-
-
 async def chunk_store_and_retrieve(
+    original_query: str = "",
     queries_by_bias: Dict[str, str] | None = None,
-    contents_by_bias: Dict[str, List[str]] | None = None,
+    contents_by_bias: Dict[str, List[Any]] | None = None,
     index_name: str = "columbus-research",
+    model_name: str = "BAAI/bge-base-en-v1.5",
+    hf_token: str | None = None,
     top_k: int = 5,
     fetch_k: int = 20,
     lambda_mult: float = 0.5,
-    pinecone_api_key: str | None = None,
-    hf_token: str | None = None,
-    chunking_strategy: str = "semantic",
+    chunking_strategy: str = "structural",
     min_chunk_size: int | None = None,
     chunk_overlap: int = 50,
     percentile_threshold: float = 20.0,
-    embedding_source: str = "local",
     **kwargs
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Chunks documents using the pluggable strategy, uploads to Pinecone DB, and retrieves top-k chunks segregated by query."""
+    """Chunks documents using the pluggable strategy and retrieves top-k chunks segregated by query (local in-memory)."""
     import logging
     logger = logging.getLogger(__name__)
 
@@ -408,118 +353,14 @@ async def chunk_store_and_retrieve(
         else:
             resolved_min_chunk_size = 500 if chunking_strategy == "recursive" else 150
 
-    # 1. Initialize Clients
-    pc_key = pinecone_api_key or os.environ.get("PINECONE_API_KEY")
-    if not pc_key:
-        raise ValueError("PINECONE_API_KEY is not set in environment or constructor parameters.")
-        
-    pc = Pinecone(api_key=pc_key)
-    
     chunker = get_chunker(
         strategy=chunking_strategy,
         hf_token=hf_token,
         min_chunk_size=resolved_min_chunk_size,
         chunk_overlap=chunk_overlap,
         percentile_threshold=percentile_threshold,
-        embedding_source=embedding_source,
-        pinecone_api_key=pc_key,
-        index_name=index_name
+        **kwargs
     )
-
-    # Resolve embed_config for integrated index creation if it does not exist
-    embed_config = None
-    if embedding_source == "integrated":
-        embed_config = {
-            "model": chunker._model_name,
-            "field_map": {"text": "text"}
-        }
-
-    index = get_or_create_index(pc, index_name, dimension=chunker.dimension, embed_config=embed_config)
-    
-    # 1.5 Special check for Pinecone Integrated Embeddings
-    if embedding_source == "integrated":
-        logger.info("Using Pinecone Integrated Embeddings (no local embedding model client-side)")
-        
-        # 2. Concurrently chunk all page content
-        chunk_tasks = []
-        chunk_task_metadata = [] # To map results back to bias_type
-        
-        for bias_type, contents in contents_by_bias.items():
-            for content in contents:
-                chunk_tasks.append(chunker.chunk(content))
-                chunk_task_metadata.append(bias_type)
-                
-        if not chunk_tasks:
-            logger.warning("No content to chunk. Returning empty matches.")
-            return {b: [] for b in queries_by_bias.keys()}
-                
-        chunk_results = await asyncio.gather(*chunk_tasks)
-        
-        # Flatten and map chunks to bias type
-        all_chunks = []
-        chunk_bias_types = []
-        
-        for i, chunks in enumerate(chunk_results):
-            bias_type = chunk_task_metadata[i]
-            cleaned = [clean_chunk_text(c) for c in chunks]
-            cleaned = [c for c in cleaned if c.strip()]
-            all_chunks.extend(cleaned)
-            chunk_bias_types.extend([bias_type] * len(cleaned))
-            
-        logger.info(f"Generated {len(all_chunks)} total chunks for integrated upsert.")
-        
-        if not all_chunks:
-            return {b: [] for b in queries_by_bias.keys()}
-            
-        # 3. Formulate records for integrated upsert
-        records = []
-        for i, chunk in enumerate(all_chunks):
-            bias_type = chunk_bias_types[i]
-            chunk_hash = hashlib.md5(chunk.encode("utf-8")).hexdigest()
-            chunk_id = f"{bias_type}_chunk_{i}_{chunk_hash}"
-            records.append({
-                "_id": chunk_id,
-                "text": chunk,
-                "bias_type": bias_type
-            })
-            
-        # Upsert records in batches of 100 to Pinecone default namespace
-        batch_size = 100
-        for j in range(0, len(records), batch_size):
-            index.upsert_records(
-                namespace="default",
-                records=records[j : j + batch_size]
-            )
-            
-        # 4. Search Pinecone integrated index
-        retrieval_matches = {}
-        for bias_type, q_text in queries_by_bias.items():
-            if not q_text.strip():
-                retrieval_matches[bias_type] = []
-                continue
-                
-            logger.info(f"Searching integrated index for {bias_type}: '{q_text}'")
-            res = index.search(
-                namespace="default",
-                query={
-                    "inputs": {
-                        "text": q_text
-                    },
-                    "top_k": top_k,
-                    "filter": {"bias_type": bias_type}
-                }
-            )
-            
-            hits = res.result.hits if (res.result and res.result.hits) else []
-            matches = []
-            for hit in hits:
-                matches.append({
-                    "text": hit.fields.get("text", ""),
-                    "score": hit.score
-                })
-            retrieval_matches[bias_type] = matches
-            
-        return retrieval_matches
 
     logger.info("Phase 1: Semantic Chunking")
     # 2. Concurrently chunk all page content
@@ -527,9 +368,15 @@ async def chunk_store_and_retrieve(
     chunk_task_metadata = [] # To map results back to bias_type
     
     for bias_type, contents in contents_by_bias.items():
-        for content in contents:
+        for item in contents:
+            if isinstance(item, dict):
+                content = item.get("content", "")
+                url = item.get("url", "")
+            else:
+                content = item
+                url = ""
             chunk_tasks.append(chunker.chunk(content))
-            chunk_task_metadata.append(bias_type)
+            chunk_task_metadata.append({"bias_type": bias_type, "url": url})
             
     if not chunk_tasks:
         logger.warning("No content to chunk. Returning empty matches.")
@@ -537,18 +384,23 @@ async def chunk_store_and_retrieve(
             
     chunk_results = await asyncio.gather(*chunk_tasks)
     
-    # Flatten, clean and map chunks to bias type
+    # Flatten, clean and map chunks to bias type and url
     all_chunks = []
     chunk_bias_types = []
+    chunk_urls = []
     
     for i, chunks in enumerate(chunk_results):
-        bias_type = chunk_task_metadata[i]
+        meta = chunk_task_metadata[i]
+        bias_type = meta["bias_type"]
+        url = meta["url"]
+        
         cleaned = [clean_chunk_text(c) for c in chunks]
-        # Filter out empty chunks
-        cleaned = [c for c in cleaned if c.strip()]
+        # Filter out chunks less than 100 words
+        cleaned = [c for c in cleaned if len(c.split()) >= 100]
         
         all_chunks.extend(cleaned)
         chunk_bias_types.extend([bias_type] * len(cleaned))
+        chunk_urls.extend([url] * len(cleaned))
         
     logger.info(f"Generated {len(all_chunks)} total chunks.")
     
@@ -564,82 +416,119 @@ async def chunk_store_and_retrieve(
         logger.info(f"Embedding chunk {idx+1}/{len(all_chunks)}: '{short_text}'")
     chunk_embeddings = await chunker.embed_sentences(all_chunks)
     
-    logger.info("Phase 3: Pinecone Upsert")
-    # 4. Formulate records and upsert to Pinecone
-    vectors = []
+    # Apply >= 0.95 Deduplication
+    unique_chunks = []
+    unique_embeddings = []
+    unique_bias_types = []
+    unique_urls = []
+    duplicate_chunks = []
+    duplicate_urls = []
     
+    if chunk_embeddings:
+        embeddings_np = np.array(chunk_embeddings)
+        sim_matrix = cosine_similarity(embeddings_np)
+        
+        keep_indices = []
+        for i in range(len(all_chunks)):
+            duplicate = False
+            for j in keep_indices:
+                if sim_matrix[i, j] >= 0.95:
+                    duplicate = True
+                    break
+            if not duplicate:
+                keep_indices.append(i)
+                unique_chunks.append(all_chunks[i])
+                unique_embeddings.append(chunk_embeddings[i])
+                unique_bias_types.append(chunk_bias_types[i])
+                unique_urls.append(chunk_urls[i])
+            else:
+                duplicate_chunks.append(all_chunks[i])
+                duplicate_urls.append(chunk_urls[i])
+                
+        logger.info(f"Deduplicated chunks: {len(all_chunks)} -> {len(unique_chunks)}")
+        all_chunks = unique_chunks
+        chunk_embeddings = unique_embeddings
+        chunk_bias_types = unique_bias_types
+        chunk_urls = unique_urls
+
+    # Save to evidence folder grouped by URL
+    from collections import defaultdict
+    
+    os.makedirs("evidence/chunks", exist_ok=True)
+    chunks_by_url = defaultdict(list)
     for i, chunk in enumerate(all_chunks):
-        emb = chunk_embeddings[i]
-        bias_type = chunk_bias_types[i]
-        chunk_hash = hashlib.md5(chunk.encode("utf-8")).hexdigest()
-        chunk_id = f"{bias_type}_chunk_{i}_{chunk_hash}"
+        url = chunk_urls[i] or "unknown_url"
+        chunks_by_url[url].append(chunk)
         
-        vectors.append({
-            "id": chunk_id,
-            "values": emb,
-            "metadata": {
-                "text": chunk,
-                "bias_type": bias_type
-            }
-        })
-        
-    # Upsert in batches of 100 to Pinecone
-    batch_size = 100
-    for j in range(0, len(vectors), batch_size):
-        index.upsert(vectors=vectors[j : j + batch_size])
-        
-    logger.info("Phase 4: Retrieval")
-    # 5. Embed queries
-    bias_types_for_queries = list(queries_by_bias.keys())
-    queries_text = [queries_by_bias[b] for b in bias_types_for_queries]
-    for idx, q_text in enumerate(queries_text):
-        logger.info(f"Embedding query {idx+1}/{len(queries_text)}: '{q_text}'")
+    for url, chunks in chunks_by_url.items():
+        url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+        with open(f"evidence/chunks/{url_hash}_chunk.md", "w") as f:
+            f.write("\n\n---\n\n".join(chunks))
+            
+    # Save duplicates to evidence folder grouped by URL
+    if duplicate_chunks:
+        os.makedirs("evidence/duplicate_chunks", exist_ok=True)
+        dup_chunks_by_url = defaultdict(list)
+        for i, chunk in enumerate(duplicate_chunks):
+            url = duplicate_urls[i] or "unknown_url"
+            dup_chunks_by_url[url].append(chunk)
+            
+        for url, chunks in dup_chunks_by_url.items():
+            url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+            with open(f"evidence/duplicate_chunks/{url_hash}_chunk.md", "w") as f:
+                f.write("\n\n---\n\n".join(chunks))
     
-    query_embs = await chunker.embed_sentences(queries_text)
-    
-    # 6. Query Pinecone separately using metadata filter
-    query_tasks = []
-    for i, bias_type in enumerate(bias_types_for_queries):
-        q_emb = query_embs[i]
-        task = index.query(
-            vector=q_emb,
-            top_k=max(top_k, fetch_k),
-            filter={"bias_type": bias_type},
-            include_metadata=True,
-            include_values=True
+    logger.info("Phase 3: Initializing In-Memory Vector Store")
+    from langchain_core.vectorstores import InMemoryVectorStore
+    from langchain_core.documents import Document
+
+    # Wrap the unique deduplicated chunks into LangChain Documents
+    unique_documents = [
+        Document(
+            page_content=chunk,
+            metadata={"bias_type": chunk_bias_types[idx], "url": chunk_urls[idx]}
         )
-        query_tasks.append(task)
+        for idx, chunk in enumerate(all_chunks)
+    ]
+
+    vectorstore = InMemoryVectorStore.from_documents(
+        unique_documents,
+        embedding=chunker._embeddings
+    )
         
-    loop = asyncio.get_running_loop()
-    query_results = await asyncio.gather(*(
-        loop.run_in_executor(None, lambda t=task: t) for task in query_tasks
-    ))
-    
-    # 7. Extract matched texts, apply MMR to re-rank and filter
+    logger.info("Phase 4: Diverse Local Retrieval (MMR)")
     retrieval_matches = {}
-    for i, bias_type in enumerate(bias_types_for_queries):
-        res = query_results[i]
-        q_emb = query_embs[i]
-        
-        matches = res.get("matches", [])
-        if not matches:
+    for bias_type, q_text in queries_by_bias.items():
+        if not q_text.strip():
             retrieval_matches[bias_type] = []
             continue
             
-        embeddings = [match["values"] for match in matches]
-        
-        # Apply MMR
-        mmr_selected_indices = maximal_marginal_relevance(
-            query_embedding=np.array(q_emb),
-            embedding_list=embeddings,
+        logger.info(f"Performing LangChain MMR search for {bias_type}: '{q_text}'")
+        retrieved_docs = vectorstore.max_marginal_relevance_search(
+            query=q_text,
+            k=top_k,
+            fetch_k=fetch_k,
             lambda_mult=lambda_mult,
-            k=top_k
+            filter=lambda doc: doc.metadata.get("bias_type") == bias_type
         )
         
-        mmr_matches = [
-            {"text": matches[idx].get("metadata", {}).get("text", ""), "score": matches[idx].get("score", 0.0)}
-            for idx in mmr_selected_indices
-        ]
+        # Calculate exact similarity scores for output compatibility
+        matched_texts = [doc.page_content for doc in retrieved_docs]
+        q_emb = await chunker.embed_sentences([q_text])
+        matched_embs = await chunker.embed_sentences(matched_texts) if matched_texts else []
+        
+        mmr_matches = []
+        if q_emb and matched_embs:
+            q_emb_np = np.array(q_emb[0]).reshape(1, -1)
+            for doc, emb in zip(retrieved_docs, matched_embs):
+                score = float(cosine_similarity(q_emb_np, np.array(emb).reshape(1, -1))[0][0])
+                mmr_matches.append({
+                    "id": hashlib.md5(doc.page_content.encode("utf-8")).hexdigest(),
+                    "text": doc.page_content,
+                    "score": score,
+                    "url": doc.metadata.get("url", "")
+                })
+                
         retrieval_matches[bias_type] = mmr_matches
         
     return retrieval_matches

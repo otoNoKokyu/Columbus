@@ -56,7 +56,7 @@ def get_config():
         top_urls_after_search=10,
         embedding_model="all-MiniLM-L6-v2",
         top_links_after_embedding=20,
-        reranker_strategy="pinecone",
+        reranker_strategy="local",
         top_links_after_rerank=5,
         recursive_crawl_depth=2,
         recursive_max_pages_per_seed=3,
@@ -148,7 +148,7 @@ def build_reranker(config, llm=None):
     _header("Building Reranker")
     from Columbus.scoring import get_reranker
     reranker = get_reranker(
-        "pinecone",
+        config.reranker_strategy,
         model_name=config.pinecone_rerank_model,
         top_n=config.top_links_after_rerank,
     )
@@ -217,6 +217,51 @@ def test_2_3_search(queries: list[str], config) -> list[dict]:
     })
     _print_json("Search results", results)
     return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# STAGE 3: Search Rerank
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_3_search_rerank(reranker, search_results: list[dict], query: str, config) -> list[dict]:
+    """
+    Stage 3: Rerank the search results based on their source query.
+    
+    Input: BaseReranker, list of search result dicts, main query string
+    Output: list of reranked search result dicts (top N)
+    """
+    _header("STAGE 3: Search Rerank")
+    
+    if not search_results:
+        print("  ⚠ No candidates to rerank. Returning empty.")
+        return []
+
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for c in search_results:
+        c["context"] = c.get("snippet", "")
+        sq = c.get("source_query", query)
+        grouped[sq].append(c)
+
+    reranked_all = []
+    for sq, group_candidates in grouped.items():
+        reranked = reranker.rerank(
+            query=sq,
+            candidates=group_candidates,
+            top_n=len(group_candidates),
+        )
+        reranked_all.extend(reranked)
+
+    reranked_all.sort(key=lambda x: x.get("rerank_score", -999.0), reverse=True)
+    top_candidates = reranked_all[:config.top_urls_after_search]
+
+    _print_summary({
+        "Input candidates": len(search_results),
+        "Kept (top N)": len(top_candidates),
+        "Best score": f"{top_candidates[0].get('rerank_score', 0):.4f}" if top_candidates else "N/A",
+    })
+    _print_json("Reranked search results", top_candidates)
+    return top_candidates
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -457,7 +502,7 @@ def test_full_pipeline(query: str, config):
         "Query": query,
         "Rewritten queries": len(state.get("rewritten_queries", [])),
         "Search results": len(state.get("search_results", [])),
-        "Top URLs": len(state.get("top_urls", [])),
+        "Search reranked URLs": len(state.get("top_urls", [])),
         "Crawled pages": len(state.get("crawled_pages", [])),
         "Extracted links": len(state.get("extracted_links", [])),
         "Embedding scored": len(state.get("embedding_scored_links", [])),
@@ -488,7 +533,10 @@ if __name__ == "__main__":
 
     # ── Stage 2-3: Search ──────────────────────────────────────────
     search_results = test_2_3_search(queries, config)
-    urls = [r["url"] for r in search_results]
+
+    # ── Stage 3: Search Rerank ─────────────────────────────────────
+    search_reranked = test_3_search_rerank(reranker, search_results, TEST_QUERY, config)
+    urls = [r["url"] for r in search_reranked]
 
     # ── Stage 4: Firecrawl ─────────────────────────────────────────
     pages = test_4_firecrawl(urls, config)

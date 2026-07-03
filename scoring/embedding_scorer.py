@@ -2,30 +2,25 @@
 
 import asyncio
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
+from langchain_core.embeddings import Embeddings
 from .base import BaseScorer
+from ..chunk_and_retrieve.main import get_embeddings
 
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingScorer(BaseScorer):
-    """Semantic similarity scorer using sentence-transformers.
+    """Semantic similarity scorer using LangChain Embeddings.
 
     Encodes the query and each candidate's (anchor_text + context) into
     dense vectors, then ranks by cosine similarity.
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5"):
-        self._model_name = model_name
-        self._model = None
-        logger.info("EmbeddingScorer initialized locally for model: %s", model_name)
-
-    def _get_model(self):
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self._model_name)
-        return self._model
+    def __init__(self, embeddings: Optional[Embeddings] = None, model_name: str = "BAAI/bge-base-en-v1.5"):
+        self._embeddings = embeddings or get_embeddings(source="local", model_name=model_name)
+        logger.info("EmbeddingScorer initialized using LangChain embeddings")
 
     async def score(
         self,
@@ -47,45 +42,41 @@ class EmbeddingScorer(BaseScorer):
             logger.warning("EmbeddingScorer: No candidates to score")
             return []
 
-        def _compute():
-            from sklearn.metrics.pairwise import cosine_similarity
-            import numpy as np
+        # Build candidate text representations
+        texts = [
+            f"{c.get('anchor_text', '')} {c.get('context', '')}"
+            for c in candidates
+        ]
 
-            # Build candidate text representations
-            texts = [
-                f"{c.get('anchor_text', '')} {c.get('context', '')}"
-                for c in candidates
-            ]
+        loop = asyncio.get_running_loop()
+        query_emb = await loop.run_in_executor(None, self._embeddings.embed_query, query)
+        candidate_embs = await loop.run_in_executor(None, self._embeddings.embed_documents, texts)
 
-            # Load the local model and compute embeddings locally in a batch
-            model = self._get_model()
-            query_emb = model.encode(query)
-            candidate_embs = model.encode(texts)
+        from sklearn.metrics.pairwise import cosine_similarity
+        import numpy as np
 
-            # Convert to numpy arrays for sklearn
-            query_emb = np.array([query_emb])
-            candidate_embs = np.array(candidate_embs)
+        # Convert to numpy arrays for sklearn
+        query_emb = np.array([query_emb])
+        candidate_embs = np.array(candidate_embs)
 
-            # Compute cosine similarity
-            scores = cosine_similarity(query_emb, candidate_embs)[0]
+        # Compute cosine similarity
+        scores = cosine_similarity(query_emb, candidate_embs)[0]
 
-            # Attach scores to candidates
-            for i, c in enumerate(candidates):
-                c["embedding_score"] = float(scores[i])
+        # Attach scores to candidates
+        for i, c in enumerate(candidates):
+            c["embedding_score"] = float(scores[i])
 
-            # Sort and truncate
-            ranked = sorted(
-                candidates,
-                key=lambda x: x["embedding_score"],
-                reverse=True,
-            )
+        # Sort and truncate
+        ranked = sorted(
+            candidates,
+            key=lambda x: x["embedding_score"],
+            reverse=True,
+        )
 
-            logger.info(
-                "Embedding scoring: %d candidates → top %d (best=%.4f)",
-                len(candidates),
-                min(top_n, len(ranked)),
-                ranked[0]["embedding_score"] if ranked else 0,
-            )
-            return ranked[:top_n]
-
-        return await asyncio.to_thread(_compute)
+        logger.info(
+            "Embedding scoring: %d candidates → top %d (best=%.4f)",
+            len(candidates),
+            min(top_n, len(ranked)),
+            ranked[0]["embedding_score"] if ranked else 0,
+        )
+        return ranked[:top_n]

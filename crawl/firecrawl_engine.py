@@ -1,7 +1,7 @@
 import asyncio
 import os
 import random
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import logging
 from firecrawl import FirecrawlApp
 from ..search import async_search
@@ -120,13 +120,19 @@ async def is_unwanted_url_async(url: str) -> bool:
 
 async def _scrape_single_url(
     url: str,
-    config: FirecrawlConfiguration,
-    app: FirecrawlApp,
-    rate_limiter: RateLimiter
+    config: Optional[FirecrawlConfiguration] = None,
+    app: Optional[FirecrawlApp] = None,
+    rate_limiter: Optional[RateLimiter] = None
 ) -> Dict[str, Any]:
     """
     Scrapes a single URL via Firecrawl with rate limiting and exponential backoff.
     """
+    if app is None:
+        api_key = (config.api_key if config else None) or os.environ.get("FIRECRAWL_API_KEY")
+        app = FirecrawlApp(api_key=api_key)
+    if rate_limiter is None:
+        rate_limiter = RateLimiter(max_concurrent=2, max_requests_per_window=10, window_seconds=60.0)
+
     if await is_unwanted_url_async(url):
         logger.info("Filtering out unwanted URL (PDF/binary/social/etc.) from scraping: %s", url)
         return {"url": url, "error": "Filtered out: Unwanted URL/format (PDF/binary/social/etc.)"}
@@ -140,10 +146,11 @@ async def _scrape_single_url(
             logger.info("Scraping URL: %s", url)
             
             # Use Firecrawl's native LLM extraction feature
+            extraction_schema = config.extraction_schema if config else None
             scrape_params = {
                 "formats": ["extract"],
                 "extract": {
-                    "schema": config.extraction_schema or {"type": "object", "properties": {"summary": {"type": "string"}}}
+                    "schema": extraction_schema or {"type": "object", "properties": {"summary": {"type": "string"}}}
                 }
             }
             
@@ -292,6 +299,19 @@ async def scrape_urls_for_markdown_crawl4ai(
                             markdown = res.markdown.markdown_with_citations
                         else:
                             markdown = res.markdown.fit_markdown or res.markdown.raw_markdown or ""
+                    
+                    if skip_links and markdown:
+                        import re
+                        markdown = re.sub(r'(?<!\!)\[([^\]\n]+)\]\([^)]+\)', r'\1', markdown)
+                        markdown = re.sub(r'https?://[^\s]+', '', markdown)
+
+                    if markdown:
+                        import hashlib
+                        os.makedirs("evidence/markdown", exist_ok=True)
+                        url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+                        with open(f"evidence/markdown/{url_hash}.md", "w") as f:
+                            f.write(markdown)
+
                     html = res.html or ""
                     filtered_results[url] = {"url": url, "markdown": markdown, "html": html}
                     logger.info("crawl4ai: Successfully scraped %s (%d chars)", url, len(markdown))
@@ -320,6 +340,19 @@ async def scrape_urls_for_markdown_crawl4ai(
                                     markdown = res.markdown.markdown_with_citations
                                 else:
                                     markdown = res.markdown.fit_markdown or res.markdown.raw_markdown or ""
+                            
+                            if skip_links and markdown:
+                                import re
+                                markdown = re.sub(r'(?<!\!)\[([^\]\n]+)\]\([^)]+\)', r'\1', markdown)
+                                markdown = re.sub(r'https?://[^\s]+', '', markdown)
+
+                            if markdown:
+                                import hashlib
+                                os.makedirs("evidence/markdown", exist_ok=True)
+                                url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+                                with open(f"evidence/markdown/{url_hash}.md", "w") as f:
+                                    f.write(markdown)
+
                             html = res.html or ""
                             filtered_results[url] = {"url": url, "markdown": markdown, "html": html}
                         else:
@@ -404,6 +437,14 @@ async def scrape_urls_for_markdown(
                     if skip_links and markdown:
                         import re
                         markdown = re.sub(r'(?<!\!)\[([^\]\n]+)\]\([^)]+\)', r'\1', markdown)
+                        markdown = re.sub(r'https?://[^\s]+', '', markdown)
+                        
+                    if markdown:
+                        import hashlib
+                        os.makedirs("evidence/markdown", exist_ok=True)
+                        url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+                        with open(f"evidence/markdown/{url_hash}.md", "w") as f:
+                            f.write(markdown)
                 logger.info(
                     "scrape_urls_for_markdown: Got %d markdown chars and %d html chars from %s",
                     len(markdown), len(html), url[:60],

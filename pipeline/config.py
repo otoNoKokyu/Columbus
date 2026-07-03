@@ -18,7 +18,7 @@ class ResearchPipelineConfig:
     max_rewritten_queries: int = 3
 
     # ── Search ──────────────────────────────────────────
-    search_provider: str = "ddg"
+    search_provider: str = "exa"
     search_results_per_query: int = 5
     top_urls_after_search: int = 10
     exa_highlight: bool = False
@@ -31,7 +31,7 @@ class ResearchPipelineConfig:
     top_links_after_embedding: int = 20
 
     # ── Reranking ───────────────────────────────────────
-    reranker_strategy: str = "pinecone"
+    reranker_strategy: str = "local"
     pinecone_rerank_model: str = "bge-reranker-v2-m3"
     top_links_after_rerank: int = 5
 

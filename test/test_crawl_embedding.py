@@ -76,7 +76,8 @@ async def embed_and_store_balanced_results(json_path: str, index_name: str = "co
             
             # Split text into semantic chunks
             chunks = await chunker.chunk(content, min_chunk_size=150, percentile_threshold=20.0)
-            print(f"    -> Generated {len(chunks)} semantic chunks.")
+            chunks = [c for c in chunks if len(c.split()) >= 100]
+            print(f"    -> Generated {len(chunks)} semantic chunks (after dropping chunks < 100 words).")
             
             if not chunks:
                 continue

@@ -6,8 +6,6 @@ langchain-aws==1.5.1
 langchain-openai
 
 # Search Clients
-ddgs==9.14.4
-duckduckgo_search==8.1.1
 exa-py==2.14.0
 
 # Scrapers & Crawlers

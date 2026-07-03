@@ -51,8 +51,8 @@ def build_rewrite_stage(
 def build_search_stage(
     config: ResearchPipelineConfig,
 ) -> Callable:
-    """Stage 2-3: Fan-out DuckDuckGo search across rewritten queries,
-    deduplicate, return top N URLs."""
+    """Stage 2: Fan-out DuckDuckGo search across rewritten queries,
+    deduplicate, return URLs for reranking."""
 
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         import asyncio
@@ -60,24 +60,73 @@ def build_search_stage(
 
         queries = state.get("rewritten_queries", [])
         logger.info(
-            "Stage 2-3: Search - Executing fan-out for %d queries "
-            "(max %d results/query, top %d URLs)",
+            "Stage 2: Search - Executing fan-out for %d queries "
+            "(max %d results/query)",
             len(queries),
             config.search_results_per_query,
-            config.top_urls_after_search,
         )
 
         results = asyncio.run(fan_out_search(
             queries=queries,
             provider=config.search_provider,
             max_results_per_query=config.search_results_per_query,
-            top_n=config.top_urls_after_search,
+            top_n=50, # Get a larger pool for reranking
         ))
 
         state["search_results"] = results
-        state["top_urls"] = [r["url"] for r in results]
         logger.info(
-            "Stage 2-3: Search - Deduplicated to %d unique URLs: %s",
+            "Stage 2: Search - Deduplicated to %d unique URLs for reranking",
+            len(results),
+        )
+        return state
+
+    return _run
+
+
+def build_search_rerank_stage(
+    reranker,  # BaseReranker — injected
+    config: ResearchPipelineConfig,
+) -> Callable:
+    """Stage 3: Rerank search results based on their source query before scraping."""
+
+    def _run(state: Dict[str, Any]) -> Dict[str, Any]:
+        candidates = state.get("search_results", [])
+        logger.info(
+            "Stage 3: Search Rerank - Reranking %d search candidates",
+            len(candidates),
+        )
+
+        if not candidates:
+            state["top_urls"] = []
+            logger.warning("Stage 3: Search Rerank - No candidates to rerank")
+            return state
+
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for c in candidates:
+            # Map snippet to context for reranker compatibility
+            c["context"] = c.get("snippet", "")
+            sq = c.get("source_query", state.get("query", ""))
+            grouped[sq].append(c)
+
+        reranked_all = []
+        for sq, group_candidates in grouped.items():
+            reranked = reranker.rerank(
+                query=sq,
+                candidates=group_candidates,
+                top_n=len(group_candidates), # Keep all for global sort
+                callbacks=state.get("callbacks"),
+            )
+            reranked_all.extend(reranked)
+
+        # Sort all by rerank_score globally
+        reranked_all.sort(key=lambda x: x.get("rerank_score", -999.0), reverse=True)
+        top_candidates = reranked_all[:config.top_urls_after_search]
+
+        state["search_results_reranked"] = top_candidates
+        state["top_urls"] = [r["url"] for r in top_candidates]
+        logger.info(
+            "Stage 3: Search Rerank - Kept top %d URLs: %s",
             len(state["top_urls"]),
             [u[:60] for u in state["top_urls"]],
         )

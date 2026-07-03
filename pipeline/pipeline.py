@@ -11,6 +11,7 @@ from .config import ResearchPipelineConfig
 from .stages import (
     build_rewrite_stage,
     build_search_stage,
+    build_search_rerank_stage,
     build_firecrawl_stage,
     build_link_extraction_stage,
     build_embedding_score_stage,
@@ -49,18 +50,20 @@ def build_research_chain(
     # ── Build stage callables ──────────────────────────────────────
     rewrite       = RunnableLambda(build_rewrite_stage(rewrite_chain)).with_config({"run_name": "Stage1:Rewrite"})
     search        = RunnableLambda(build_search_stage(config)).with_config({"run_name": "Stage2:Search"})
+    search_rerank = RunnableLambda(build_search_rerank_stage(reranker, config)).with_config({"run_name": "Stage3:SearchRerank"})
     firecrawl     = RunnableLambda(build_firecrawl_stage(config)).with_config({"run_name": "Stage4:Firecrawl"})
     link_extract  = RunnableLambda(build_link_extraction_stage()).with_config({"run_name": "Stage5:LinkExtraction"})
     emb_score     = RunnableLambda(build_embedding_score_stage(embedding_scorer, config)).with_config({"run_name": "Stage6:EmbeddingScore"})
     rerank        = RunnableLambda(build_rerank_stage(reranker, config)).with_config({"run_name": "Stage8:Rerank"})
     recursive     = RunnableLambda(build_recursive_crawl_stage(embedding_scorer, config)).with_config({"run_name": "Stage9:RecursiveCrawl"})
 
-    logger.info("Research pipeline chain assembled with %d stages", 7)
+    logger.info("Research pipeline chain assembled with %d stages", 8)
 
     # ── Full chain ─────────────────────────────────────────────────
     return (
         rewrite
         | search
+        | search_rerank
         | firecrawl
         | link_extract
         | emb_score

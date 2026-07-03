@@ -27,18 +27,20 @@ __all__ = [
 # ---------------------------------------------------------------------------
 RERANKERS: Dict[str, str] = {
     "pinecone": "PineconeReranker",
+    "local": "LocalReranker",
 }
 
-DEFAULT_RERANKER = "pinecone"
+DEFAULT_RERANKER = "local"
 
 
 def get_reranker(name: Optional[str] = None, **kwargs) -> BaseReranker:
     """Instantiate and return a reranker by name.
 
     Args:
-        name: Key in the RERANKERS dict. Defaults to 'pinecone'.
+        name: Key in the RERANKERS dict. Defaults to 'local'.
         **kwargs: Arguments passed to the reranker constructor.
 
+            For 'local': model_name, top_n.
             For 'pinecone': model_name, api_key, top_n.
 
     Returns:
@@ -52,6 +54,9 @@ def get_reranker(name: Optional[str] = None, **kwargs) -> BaseReranker:
     if name == "pinecone":
         from .pinecone_reranker import PineconeReranker
         return PineconeReranker(**kwargs)
+    elif name == "local":
+        from .local_reranker import LocalReranker
+        return LocalReranker(**kwargs)
     else:
         available = ", ".join(sorted(RERANKERS.keys()))
         raise ValueError(

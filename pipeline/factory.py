@@ -42,11 +42,12 @@ def create_research_chain(
     )
 
     # ── Build embedding scorer ─────────────────────────────────────
-    embedding_scorer = EmbeddingScorer(model_name=config.embedding_model)
+    from ..chunk_and_retrieve.main import get_embeddings
+    embeddings = get_embeddings(source=config.embedding_source, model_name=config.embedding_model)
+    embedding_scorer = EmbeddingScorer(embeddings=embeddings)
 
-    # ── Build reranker ─────────────────────────────────────────────
     reranker = get_reranker(
-        "pinecone",
+        config.reranker_strategy,
         model_name=config.pinecone_rerank_model,
         top_n=config.top_links_after_rerank,
     )
