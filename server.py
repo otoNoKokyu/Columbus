@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 from typing import AsyncGenerator
 from dotenv import load_dotenv
 
@@ -15,7 +14,7 @@ from Columbus.pipeline.config import ResearchPipelineConfig
 
 app = FastAPI(title="Columbus Agent API")
 
-logger = logging.getLogger(__name__)
+from Columbus.utils.logger import logger
 
 # Keep a single instance of the chain for the server lifetime
 pipeline_chain = create_research_chain(ResearchPipelineConfig())

@@ -2,15 +2,12 @@ import asyncio
 import os
 import random
 from typing import Any, Dict, Optional
-import logging
 from firecrawl import FirecrawlApp
 from ..search import async_search
 
 from .config import FirecrawlConfiguration
 from .rate_limiter import RateLimiter
-
-logger = logging.getLogger(__name__)
-
+from Columbus.utils.logger import logger
 
 def is_unwanted_url_fast(url: str) -> bool:
     """

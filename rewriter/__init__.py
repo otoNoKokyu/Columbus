@@ -11,7 +11,7 @@ Usage::
 """
 
 from .chain import create_rewrite_chain, create_balanced_rewrite_chain, create_adaptive_decomposition_chain
-from .prompts import QUERY_REWRITE_PROMPT, BALANCED_REWRITE_PROMPT, BUDGET_QUERY_GENERATOR_PROMPT
+from .prompts import QUERY_REWRITE_PROMPT, BALANCED_REWRITE_PROMPT, BUDGET_QUERY_GENERATOR_PROMPT, CRITIC_DECOMPOSITION_PROMPT
 
 __all__ = [
     "create_rewrite_chain",
@@ -20,4 +20,5 @@ __all__ = [
     "QUERY_REWRITE_PROMPT",
     "BALANCED_REWRITE_PROMPT",
     "BUDGET_QUERY_GENERATOR_PROMPT",
+    "CRITIC_DECOMPOSITION_PROMPT",
 ]

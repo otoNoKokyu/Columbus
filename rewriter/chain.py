@@ -35,7 +35,7 @@ def create_rewrite_chain(
     _inner = QUERY_REWRITE_PROMPT | llm | JsonOutputParser()
 
     def _rewrite(inputs: Dict[str, Any]) -> List[str]:
-        question = inputs["question"]
+        question = inputs.get("question") or inputs.get("original_query") or ""
         fallback = [question]
         try:
             parsed = _inner.invoke(
@@ -96,8 +96,66 @@ def create_adaptive_decomposition_chain(
 
     def _adaptive_decompose(inputs: Dict[str, Any]) -> DecomposedQuery:
         query = inputs["query"]
+        critic_feedback = inputs.get("critic_feedback")
         callbacks = inputs.get("callbacks")
         config = {"callbacks": callbacks} if callbacks else {}
+
+        if critic_feedback:
+            from .prompts import CRITIC_DECOMPOSITION_PROMPT
+            critic_chain = CRITIC_DECOMPOSITION_PROMPT | llm | parser
+            try:
+                if not isinstance(critic_feedback, str):
+                    import json
+                    critic_feedback_str = json.dumps(critic_feedback, indent=2, ensure_ascii=False)
+                else:
+                    critic_feedback_str = critic_feedback
+
+                res = critic_chain.invoke({
+                    "query": query,
+                    "critic_feedback": critic_feedback_str,
+                    "budget": query_budget
+                }, config=config)
+
+                objectives_raw = res.get("objectives", ["Address gaps in retrieved evidence"])
+                raw_queries = res.get("search_queries", [])
+
+                objectives = []
+                for obj in objectives_raw:
+                    if isinstance(obj, dict):
+                        objectives.append(obj.get("objective") or obj.get("text") or "Address gaps in retrieved evidence")
+                    else:
+                        objectives.append(str(obj))
+
+                search_queries = []
+                for q_idx, q in enumerate(raw_queries):
+                    idx = int(q.get("objective_index", 0))
+                    if idx >= len(objectives):
+                        idx = 0
+                    search_queries.append(SearchQuery(
+                        query=q.get("query", ""),
+                        objective_id=f"critic_obj_{idx}_q_{q_idx}",
+                        objective_text=f"{objectives[idx]}",
+                        intent=q.get("intent", "critical")
+                    ))
+
+                if not search_queries:
+                    search_queries = [
+                        SearchQuery(
+                            query=query,
+                            objective_id="critic_obj_0_q_0",
+                            objective_text=objectives[0]
+                        )
+                    ]
+
+                return DecomposedQuery(
+                    original_query=query,
+                    query_type="multi",
+                    objectives=objectives,
+                    search_queries=search_queries
+                )
+            except Exception as e:
+                logger.error("Critic-aware decomposition failed: %s", e)
+                # Fallback to normal flow below
 
         # 1. Classify
         classifier_chain = QUERY_CLASSIFIER_PROMPT | llm | parser
@@ -111,22 +169,22 @@ def create_adaptive_decomposition_chain(
         # 2. Handle based on type
         if q_type == "single":
             # Just generate simple queries
-            rewrite_chain = create_rewrite_chain(llm, max_queries=min(3, query_budget))
+            rewrite_chain = create_rewrite_chain(llm, max_queries=max(3, min(5, query_budget)))
             queries = rewrite_chain.invoke({"question": query}, config=config)
             
             search_queries = [
                 SearchQuery(
                     query=q, 
-                    objective_id="single", 
-                    objective_text="Direct query search",
+                    objective_id=f"single_{i}", 
+                    objective_text=f"Direct query search - Angle {i+1}",
                     intent="foundational"
-                ) for q in queries
+                ) for i, q in enumerate(queries)
             ]
             
             return DecomposedQuery(
                 original_query=query,
                 query_type="single",
-                objectives=["Direct query search"],
+                objectives=[f"Direct query search - Angle {i+1}" for i in range(len(queries))],
                 search_queries=search_queries
             )
         else:
@@ -153,21 +211,21 @@ def create_adaptive_decomposition_chain(
                 allocs = allocations_res.get("allocations", [])
                 
                 search_queries = []
-                for a in allocs:
+                for q_idx, a in enumerate(allocs):
                     idx = int(a.get("objective_index", 0))
                     if idx >= len(objectives):
                         idx = 0
                     
                     search_queries.append(SearchQuery(
                         query=a.get("query", ""),
-                        objective_id=f"obj_{idx}",
-                        objective_text=objectives[idx],
+                        objective_id=f"obj_{idx}_q_{q_idx}",
+                        objective_text=f"{objectives[idx]} - Variant {q_idx + 1}",
                         intent=a.get("intent", "")
                     ))
                     
                 # Fallback if empty
                 if not search_queries:
-                    search_queries = [SearchQuery(query=query, objective_id="obj_0", objective_text=objectives[0])]
+                    search_queries = [SearchQuery(query=query, objective_id="obj_0_q_0", objective_text=objectives[0])]
                     
                 return DecomposedQuery(
                     original_query=query,
@@ -182,7 +240,7 @@ def create_adaptive_decomposition_chain(
                     original_query=query,
                     query_type="multi",
                     objectives=objectives,
-                    search_queries=[SearchQuery(query=query, objective_id="obj_0", objective_text=objectives[0])]
+                    search_queries=[SearchQuery(query=query, objective_id="obj_0_q_0", objective_text=objectives[0])]
                 )
 
     return RunnableLambda(_adaptive_decompose).with_config({"run_name": "AdaptiveDecompositionNode"})

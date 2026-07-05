@@ -9,11 +9,9 @@ for independent testability.
 """
 
 import asyncio
-import logging
 import os
 from typing import Any, Dict, List, Optional, Set
-
-logger = logging.getLogger(__name__)
+from Columbus.utils.logger import logger
 
 
 def get_token_count(text: str) -> int:
@@ -336,16 +334,16 @@ async def frontier_balanced_crawl(
 
         limit = pages_per_level[depth] if depth < len(pages_per_level) else 1
 
-        # Filter out already visited links and those below threshold or unwanted
+        # Filter out already visited links and those that are unwanted
+        # Score threshold is applied at the reranker step (after child-link reranking),
+        # so by the time candidates reach here they are already above the threshold.
         unvisited_candidates = []
         for cand in current_level_candidates:
             if cand["url"] not in visited and not await is_unwanted_url_async(cand["url"]):
-                score = cand.get("rerank_score") or cand.get("score") or 0.0
-                if score >= score_threshold:
-                    unvisited_candidates.append(cand)
+                unvisited_candidates.append(cand)
 
         if not unvisited_candidates:
-            logger.warning(f"[Crawl Status] Depth {depth}: No candidates met score threshold >= {score_threshold}. Skipping level.")
+            logger.info(f"[Crawl Status] Depth {depth}: No viable candidates left (all visited or unwanted). Terminating crawl.")
             break
 
         # Scrape up to 'limit' pages at this level
@@ -479,11 +477,20 @@ async def frontier_balanced_crawl(
                 for cand in next_level_candidates_dedup:
                     cand["rerank_score"] = 0.0
 
-            # Sort next level candidates by score
+            # Sort next level candidates by score, then apply score threshold
             current_level_candidates = sorted(
                 next_level_candidates_dedup,
                 key=lambda x: x.get("rerank_score") or 0.0,
                 reverse=True,
+            )
+            before_threshold = len(current_level_candidates)
+            current_level_candidates = [
+                c for c in current_level_candidates
+                if (c.get("rerank_score") or 0.0) >= score_threshold
+            ]
+            logger.info(
+                "[Crawl Status] Depth %d rerank threshold >= %.2f: %d -> %d candidates survive.",
+                depth + 1, score_threshold, before_threshold, len(current_level_candidates)
             )
         else:
             current_level_candidates = []

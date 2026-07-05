@@ -1,12 +1,10 @@
 import asyncio
-import logging
 from crawl4ai import AsyncWebCrawler
 from crawl4ai.async_configs import BrowserConfig
 
 from .config import Crawl4AIConfiguration
 from .crawl4ai_factory import initialize_dynamic_crawl
-
-logger = logging.getLogger(__name__)
+from Columbus.utils.logger import logger
 
 async def execute_crawl4ai(config: Crawl4AIConfiguration):
     """

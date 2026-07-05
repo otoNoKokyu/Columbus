@@ -4,12 +4,10 @@ Fast and managed API-based reranking.
 """
 
 import os
-import logging
 from typing import List, Dict, Any, Optional
 
 from .base import BaseReranker
-
-logger = logging.getLogger(__name__)
+from Columbus.utils.logger import logger
 
 
 class PineconeReranker(BaseReranker):

@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from langchain_core.embeddings import Embeddings
-
+from ..types.pipeline_exit import EarlyExitReason, PipelineEarlyExit
 
 
 def get_embeddings(
@@ -379,8 +379,11 @@ async def chunk_store_and_retrieve(
             chunk_task_metadata.append({"objective_id": objective_id, "url": url})
             
     if not chunk_tasks:
-        logger.warning("No content to chunk. Returning empty matches.")
-        return {b: [] for b in queries_by_objective.keys()}
+        raise PipelineEarlyExit(
+            reason=EarlyExitReason.NO_CHUNKS_GENERATED,
+            value=0,
+            message="No content was available to chunk — all objectives had empty page content."
+        )
             
     chunk_results = await asyncio.gather(*chunk_tasks)
     
@@ -403,9 +406,16 @@ async def chunk_store_and_retrieve(
         chunk_urls.extend([url] * len(cleaned))
         
     logger.info(f"Generated {len(all_chunks)} total chunks.")
-    
+
     if not all_chunks:
-        return {b: [] for b in queries_by_objective.keys()}
+        raise PipelineEarlyExit(
+            reason=EarlyExitReason.NO_CHUNKS_GENERATED,
+            value=0,
+            message=(
+                "All chunks were discarded after cleaning (< 100 words each). "
+                "Page content may be too short or consist entirely of boilerplate."
+            )
+        )
         
     # 3. Generate embeddings in parallel for all chunks
     chunk_embeddings = []
@@ -450,6 +460,16 @@ async def chunk_store_and_retrieve(
         chunk_embeddings = unique_embeddings
         chunk_objective_ids = unique_objective_ids
         chunk_urls = unique_urls
+
+        if not all_chunks:
+            raise PipelineEarlyExit(
+                reason=EarlyExitReason.NO_CHUNKS_AFTER_DEDUP,
+                value=len(duplicate_chunks),
+                message=(
+                    f"All {len(duplicate_chunks)} chunks were near-duplicates (cosine >= 0.95). "
+                    "No unique chunks remain after deduplication."
+                )
+            )
 
     # Save to evidence folder grouped by URL
     from collections import defaultdict

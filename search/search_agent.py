@@ -5,9 +5,7 @@ from typing import Any, Dict, List, Optional
 import argparse
 import sys
 import time
-import logging
-
-logger = logging.getLogger(__name__)
+from Columbus.utils.logger import logger
 
 SOCIAL_MEDIA_DOMAINS = [
     "facebook.com", "twitter.com", "x.com", "instagram.com", "tiktok.com",
@@ -187,24 +185,50 @@ async def fan_out_search(
     Returns:
         List of dicts with keys: title, url, snippet, source_query.
     """
-    if not queries:
-        logger.warning("fan_out_search: No queries provided")
+    # Deduplicate queries while preserving order
+    unique_queries = []
+    seen_queries = set()
+    for q in queries:
+        q_clean = q.strip()
+        if q_clean and q_clean not in seen_queries:
+            seen_queries.add(q_clean)
+            unique_queries.append(q_clean)
+
+    if not unique_queries:
+        logger.warning("fan_out_search: No valid queries provided after cleaning")
         return []
 
+    logger.info("fan_out_search: Executing search for queries: %s", unique_queries)
     client = get_search_client(provider)
 
     # Execute all queries concurrently
     tasks = [
         client.async_search(query, max_results=max_results_per_query, **kwargs)
-        for query in queries
+        for query in unique_queries
     ]
     all_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Print raw search results for each query for visibility
+    logger.info("=====================================")
+    logger.info("RAW SEARCH RESULTS FOR EACH QUERY:")
+    logger.info("=====================================")
+    for query, results in zip(unique_queries, all_results):
+        if isinstance(results, BaseException):
+            logger.error("  Query '%s' failed: %s", query, results)
+            continue
+        logger.info("  Query: '%s' (Found %d results)", query, len(results))
+        for idx, res in enumerate(results):
+            logger.info("    [%d] Score: %s | Title: %s", idx + 1, res.get("score"), res.get("title"))
+            logger.info("        URL: %s", res.get("url"))
+            snippet = res.get("snippet", "")
+            logger.info("        Snippet: %s...", snippet[:120].replace('\n', ' '))
+    logger.info("=====================================")
 
     # Merge and deduplicate
     merged: List[Dict[str, Any]] = []
     seen_urls: set = set()
 
-    for query, results in zip(queries, all_results):
+    for query, results in zip(unique_queries, all_results):
         if isinstance(results, BaseException):
             logger.error("fan_out_search: Query '%s' failed: %s", query, results)
             continue

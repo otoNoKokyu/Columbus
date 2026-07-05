@@ -1,11 +1,9 @@
 """Local Reranker using SentenceTransformers CrossEncoder."""
 
-import logging
 from typing import List, Dict, Any, Optional
 
 from .base import BaseReranker
-
-logger = logging.getLogger(__name__)
+from Columbus.utils.logger import logger
 
 class LocalReranker(BaseReranker):
     """Reranker using a local HuggingFace CrossEncoder model."""

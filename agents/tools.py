@@ -1,22 +1,27 @@
 import asyncio
+import os
+import json
 from typing import Any, List, Dict, TYPE_CHECKING, Optional
+from Columbus.utils.logger import logger
 from langchain_core.runnables import RunnableLambda
-from ..search import async_search
+from ..search import async_search, fan_out_search
 from ..crawl.recursive_crawler import frontier_balanced_crawl
 from ..types.types import Query, RewriterInput, CrawlResult, PerspectiveResult, ResearchOutput
-
-if TYPE_CHECKING:
-    from ..scoring.pinecone_reranker import PineconeReranker
-
+from ..types.pipeline_exit import EarlyExitReason, PipelineEarlyExit
+from ..scoring.pinecone_reranker import PineconeReranker
 from ..llm import get_langchain_llm
 from ..rewriter.chain import create_adaptive_decomposition_chain
 from ..types.types import DecomposedQuery
+from ..scoring.local_reranker import LocalReranker
+from ..chunk_and_retrieve.main import chunk_store_and_retrieve
+from Columbus.crawl.rate_limiter import RateLimiter
 
-def decompose_query(query: str, query_budget: int = 6, callbacks: Optional[List[Any]] = None) -> DecomposedQuery:
+def decompose_query(
+    query: str, query_budget: int = 6, callbacks: Optional[List[Any]] = None, critic_feedback: Optional[str] = None) -> DecomposedQuery:
     llm = get_langchain_llm(temperature=0.0)
     rewrite_chain = create_adaptive_decomposition_chain(llm, query_budget=query_budget)
     rewritten_queries = rewrite_chain.invoke(
-        {"query": query},
+        {"query": query, "critic_feedback": critic_feedback},
         config={"callbacks": callbacks} if callbacks else {}
     )
     return rewritten_queries
@@ -37,9 +42,6 @@ async def search_crawl_rerank_single_query(
     skip_links: bool = True,
     visited_urls: Optional[List[str]] = None,
 ) -> List[CrawlResult]:
-    import logging
-    logger = logging.getLogger(__name__)
-
     if recursive_crawl:
         if max_depth is None or max_depth < 1:
             raise ValueError("max_depth must be at least 1 when recursive_crawl is enabled")
@@ -101,6 +103,23 @@ async def search_crawl_rerank_single_query(
         for page in scraped_pages
     ]
 
+def gather_evidence(chunks: List[Dict[str, Any]] | Dict[str, List[Dict[str, Any]]] | None) -> str:
+    if chunks is None:
+        return ""
+    flat_list = []
+    if isinstance(chunks, dict):
+        for obj_chunks in chunks.values():
+            if isinstance(obj_chunks, list):
+                flat_list.extend(obj_chunks)
+    elif isinstance(chunks, list):
+        flat_list = chunks
+
+    # Filter chunks where score > 0.7
+    filtered_chunks = [c for c in flat_list if isinstance(c, dict) and c.get("score", 0.0) > 0.7]
+
+    # Join the chunk texts with double newlines
+    return "\n\n".join(c.get("text", "") for c in filtered_chunks)
+
 async def search_crawl_rerank_queries(
     decomposed: DecomposedQuery,
     original_user_input: str,
@@ -118,19 +137,9 @@ async def search_crawl_rerank_queries(
     skip_links: bool = True,
     cache_file: str | None = None,
     top_k: int = 5,
+    score_threshold: float = 0.7,
     visited_urls: Optional[List[str]] = None,
 ) -> ResearchOutput:
-    import os
-    import json
-    import logging
-    from ..scoring.local_reranker import LocalReranker
-    from ..chunk_and_retrieve.main import chunk_store_and_retrieve
-    from Columbus.crawl.rate_limiter import RateLimiter
-    from ..search import fan_out_search
-    from ..crawl.recursive_crawler import frontier_balanced_crawl
-
-    logger = logging.getLogger(__name__)
-
     if recursive_crawl:
         if max_depth is None or max_depth < 1:
             raise ValueError("max_depth must be at least 1 when recursive_crawl is enabled")
@@ -145,6 +154,8 @@ async def search_crawl_rerank_queries(
     # 1. Fan-out Search
     queries = decomposed.get_flat_query_strings()
     logger.info("Executing global fan-out search for %d queries", len(queries))
+    for q_idx, q in enumerate(queries):
+        logger.info("  Query %d: %s", q_idx + 1, q)
     
     # We pass deduplicate=True to fan_out_search so it returns unique URLs
     # and keeps the source_query for the first query that found it
@@ -155,11 +166,24 @@ async def search_crawl_rerank_queries(
         deduplicate=True,
         top_n=100  # Pull a large pool before global rerank
     )
-    
+
+    if not search_results:
+        raise PipelineEarlyExit(
+            reason=EarlyExitReason.NO_SEARCH_RESULTS,
+            value=0,
+            message=f"Fan-out search across {len(queries)} queries returned zero results."
+        )
+
     # Filter out already visited URLs
     if visited_urls:
         visited_set = set(visited_urls)
         search_results = [res for res in search_results if res.get("url") not in visited_set]
+        if not search_results:
+            raise PipelineEarlyExit(
+                reason=EarlyExitReason.NO_URLS_AFTER_VISITED_FILTER,
+                value=len(visited_urls),
+                message=f"All search results were already visited. Visited set size: {len(visited_urls)}."
+            )
 
     # 2. Global Rerank
     logger.info("Reranking %d unique search results against original user input", len(search_results))
@@ -168,6 +192,29 @@ async def search_crawl_rerank_queries(
         candidates=search_results, 
         top_n=max_rerank
     )
+
+    if not reranked_results:
+        raise PipelineEarlyExit(
+            reason=EarlyExitReason.NO_URLS_AFTER_RERANK,
+            value=len(search_results),
+            message=f"Global reranker returned 0 candidates from a pool of {len(search_results)} URLs."
+        )
+
+    # Apply score threshold — drop anything below score_threshold before crawl
+    reranked_results = [r for r in reranked_results if r.get("rerank_score", 0.0) >= score_threshold]
+    logger.info(
+        "%d URLs survived score_threshold >= %.2f filter (pre-crawl)",
+        len(reranked_results), score_threshold
+    )
+    if not reranked_results:
+        raise PipelineEarlyExit(
+            reason=EarlyExitReason.NO_URLS_AFTER_SCORE_THRESHOLD,
+            value=score_threshold,
+            message=(
+                f"All reranked URLs had rerank_score < {score_threshold}. "
+                "Try lowering score_threshold or broadening the query."
+            )
+        )
     
     # 3. Frontier Crawl (Global)
     logger.info("Executing frontier crawl on top %d global URLs", len(reranked_results))
@@ -185,6 +232,16 @@ async def search_crawl_rerank_queries(
         skip_links=skip_links,
         visited=set(visited_urls) if visited_urls else None,
     )
+
+    if not scraped_pages:
+        raise PipelineEarlyExit(
+            reason=EarlyExitReason.NO_PAGES_CRAWLED,
+            value=len(reranked_results),
+            message=(
+                f"Frontier crawl scraped 0 pages from {len(reranked_results)} seed URLs. "
+                "All seeds may have been unwanted, below score threshold (0.7), or failed to scrape."
+            )
+        )
     
     # Create mapping from url to its source query (from fan_out_search)
     url_to_source_query = {r.get("url"): r.get("source_query") for r in search_results}
@@ -230,6 +287,17 @@ async def search_crawl_rerank_queries(
             
             perspectives_map[obj_id].pages_crawled.append(crawl_res)
             contents_by_objective[obj_id].append({"url": url, "content": content})
+
+    total_content_items = sum(len(v) for v in contents_by_objective.values())
+    if total_content_items == 0:
+        raise PipelineEarlyExit(
+            reason=EarlyExitReason.NO_CONTENT_AFTER_CRAWL,
+            value=len(scraped_pages),
+            message=(
+                f"All {len(scraped_pages)} scraped pages had an empty URL or empty content. "
+                "Nothing to pass to the chunker."
+            )
+        )
 
     perspectives = list(perspectives_map.values())
 

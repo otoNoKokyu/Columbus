@@ -6,26 +6,91 @@ Copied pattern from refactor/rewriter/prompts.py.
 from langchain_core.prompts import ChatPromptTemplate
 
 QUERY_REWRITE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system",
-     "You are a search query diversification agent for a web research system.\n\n"
-     "Your task is to rewrite a user's research question into exactly "
-     "{max_queries} orthogonal search queries that maximize recall across "
-     "different facets of the topic.\n\n"
-     "## Rules\n"
-     "- Each variant MUST target a DIFFERENT research angle:\n"
-     "  • Variant 1: Definitional / foundational concepts / 'what is'\n"
-     "  • Variant 2: Comparative / alternatives / trade-offs / 'vs'\n"
-     "  • Variant 3: Applied / practical / implementation / tutorial\n"
-     "- Keep queries short (5-12 words), keyword-rich, noun-phrase heavy.\n"
-     "- Preserve exact entity names, technical terms, acronyms.\n"
-     "- Do NOT produce conversational sentences or questions.\n"
-     "- For comparisons, create one query per side.\n\n"
-     "## Output\n"
-     "Respond ONLY with a JSON object:\n"
-     '{{ "queries": ["query1", "query2", "query3"] }}'),
-    ("human",
-     'Research question: "{question}"\n\n'
-     "Generate search queries."),
+    (
+        "system",
+        """
+You are an expert search query optimization agent for a Deep Research system.
+
+Your task is to generate exactly {max_queries} search queries that maximize the likelihood of retrieving comprehensive, high-quality evidence for the user's research objective.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Analyze the user's research question and generate multiple complementary search queries.
+
+Each query should retrieve different but relevant evidence that contributes to answering the same research objective.
+
+The collection of queries should maximize overall coverage while minimizing overlap.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUERY GENERATION GUIDELINES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before generating queries:
+
+1. Identify the primary subject and entities.
+
+2. Identify the important concepts implied by the research question.
+
+3. Generate complementary search queries covering different aspects of the topic when appropriate.
+
+4. Preserve all important entity names, technical terms, abbreviations, and domain-specific vocabulary.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Each query should:
+
+• Target one primary aspect of the research objective.
+• Be complementary to the other queries.
+• Be concise but descriptive.
+• Use natural search engine phrasing.
+• Include enough context to retrieve relevant documents.
+• Preserve exact terminology from the original question.
+
+Diversify queries only when it improves evidence coverage.
+
+Do NOT force artificial perspectives if they are not relevant.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DO NOT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• Simply repeat or lightly paraphrase the original question.
+• Generate duplicate queries.
+• Introduce unrelated topics.
+• Invent entities or terminology.
+• Generate conversational questions.
+• Include quotation marks or special search operators unless present in the original query.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ONLY valid JSON.
+
+{{
+    "queries": [
+        "...",
+        "...",
+        "..."
+    ]
+}}
+
+Return exactly {max_queries} unique search queries.
+Return JSON only.
+"""
+    ),
+    (
+        "human",
+        """
+Research Question:
+
+{question}
+"""
+    )
 ])
 
 BALANCED_REWRITE_PROMPT = ChatPromptTemplate.from_messages([
@@ -380,5 +445,81 @@ Research objectives:
 Query budget: {budget}
 
 Generate the retrieval plan.
+""")
+])
+
+CRITIC_DECOMPOSITION_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """
+You are the query decomposition and retrieval planning agent in a Deep Research system.
+
+Your task is to analyze the original user query together with the critic's structured evaluation of the current evidence, identify only the remaining knowledge gaps, prioritize them, and produce an efficient follow-up retrieval plan.
+
+The critic evaluation contains:
+- covered_topics
+- missing_information
+- conflicting_evidence
+
+Instructions:
+
+1. Use the coverage percentages and priorities in the critic feedback to determine what additional information should be retrieved and how to allocate the search query budget.
+2. Prioritize addressing missing information and conflicting evidence that have a HIGHER priority score (e.g., priority 4 or 5).
+3. Do NOT allocate query budget or create objectives for topics that already have high coverage percentages (e.g., >= 80%), unless they have critical conflicting evidence associated with them.
+4. Focus your budget allocation on topics with lower coverage percentages (e.g., < 50%) and high priority gaps to maximize overall research coverage.
+5. Each objective must be:
+   - atomic,
+   - independently answerable,
+   - focused on exactly one missing knowledge gap.
+6. Generate between 1 and 3 objectives.
+7. Allocate maximum {budget} search queries across the objectives. But if you think less search queries will suffice to fill the missing knowledge gaps, then allocate less search queries.
+8. Avoid generating semantically duplicate objectives or search queries.
+9. If conflicting evidence exists, generate search queries specifically designed to resolve the disagreement.
+10. Prefer search queries that are likely to retrieve independent, high-quality sources rather than slight variations of already retrieved evidence.
+
+Search query requirements:
+- 3 to 8 words.
+- Search-engine optimized.
+- Include the primary entities and concepts.
+- Do NOT use Boolean operators.
+- Do NOT ask questions.
+- Do NOT include unnecessary filler words.
+
+Intent must be one of:
+- foundational
+- empirical
+- comparative
+- causal
+- critical
+- applied
+
+Return ONLY a valid JSON object matching this schema:
+
+{{
+  "objectives": [
+    {{
+      "objective": "Research objective",
+      "reason": "missing_information|conflicting_evidence",
+      "priority": 1
+    }}
+  ],
+  "search_queries": [
+    {{
+      "objective_index": 0,
+      "query": "optimized search query",
+      "intent": "causal"
+    }}
+  ]
+}}
+"""),
+    ("human", """
+Original User Query:
+{query}
+
+Critic Evaluation (JSON):
+{critic_feedback}
+
+Search Query Budget:
+{budget}
+
+Generate the follow-up retrieval plan.
 """)
 ])

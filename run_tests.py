@@ -70,16 +70,8 @@ def get_config():
 
 def setup_logging(level=logging.INFO):
     """Configure logging for the test run."""
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    # Quiet noisy libraries
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+    from Columbus.utils.logger import setup_logger
+    setup_logger()
 
 
 # ═══════════════════════════════════════════════════════════════════════
