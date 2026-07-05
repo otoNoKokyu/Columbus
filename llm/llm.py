@@ -17,7 +17,7 @@ _dotenv_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=_dotenv_path)
 
 
-def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None):
+def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None,model: Optional[str] = None,region: Optional[str] = None):
     """Factory to get the LangChain LLM chat model.
 
     Provider priority: explicit arg > LLM_PROVIDER env > default 'bedrock'.
@@ -30,8 +30,8 @@ def get_langchain_llm(temperature: float = 0.0, provider: Optional[str] = None):
         from langchain_aws import ChatBedrockConverse
         from ..utils.callbacks import TokenMeasurerCallbackHandler
 
-        model = os.getenv("BEDROCK_MODEL", "deepseek.v3-v1:0")
-        region_name = os.getenv("AWS_DEFAULT_REGION", "ap-southeast-2")
+        model = model or os.getenv("BEDROCK_MODEL", "deepseek.v3-v1:0")
+        region_name = region or os.getenv("AWS_DEFAULT_REGION", "ap-southeast-2")
         profile_name = os.getenv("AWS_PROFILE")
 
         session = boto3.Session(profile_name=profile_name) if profile_name else boto3.Session()

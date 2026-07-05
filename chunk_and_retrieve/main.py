@@ -302,8 +302,8 @@ def clean_chunk_text(text: str) -> str:
 
 async def chunk_store_and_retrieve(
     original_query: str = "",
-    queries_by_bias: Dict[str, str] | None = None,
-    contents_by_bias: Dict[str, List[Any]] | None = None,
+    queries_by_objective: Dict[str, str] | None = None,
+    contents_by_objective: Dict[str, List[Any]] | None = None,
     index_name: str = "columbus-research",
     model_name: str = "BAAI/bge-base-en-v1.5",
     hf_token: str | None = None,
@@ -321,24 +321,24 @@ async def chunk_store_and_retrieve(
     logger = logging.getLogger(__name__)
 
     # Support backward compatibility parameters
-    if queries_by_bias is None:
-        queries_by_bias = {}
-    if contents_by_bias is None:
-        contents_by_bias = {}
+    if queries_by_objective is None:
+        queries_by_objective = {}
+    if contents_by_objective is None:
+        contents_by_objective = {}
 
     supporting_query = kwargs.get("supporting_query")
     opposing_query = kwargs.get("opposing_query")
     supporting_contents = kwargs.get("supporting_contents")
     opposing_contents = kwargs.get("opposing_contents")
 
-    if supporting_query and "supporting" not in queries_by_bias:
-        queries_by_bias["supporting"] = supporting_query
-    if opposing_query and "opposing" not in queries_by_bias:
-        queries_by_bias["opposing"] = opposing_query
-    if supporting_contents and "supporting" not in contents_by_bias:
-        contents_by_bias["supporting"] = supporting_contents
-    if opposing_contents and "opposing" not in contents_by_bias:
-        contents_by_bias["opposing"] = opposing_contents
+    if supporting_query and "supporting" not in queries_by_objective:
+        queries_by_objective["supporting"] = supporting_query
+    if opposing_query and "opposing" not in queries_by_objective:
+        queries_by_objective["opposing"] = opposing_query
+    if supporting_contents and "supporting" not in contents_by_objective:
+        contents_by_objective["supporting"] = supporting_contents
+    if opposing_contents and "opposing" not in contents_by_objective:
+        contents_by_objective["opposing"] = opposing_contents
 
     # Map legacy chunk_size / min_chunk_size defaults
     legacy_chunk_size = kwargs.get("chunk_size")
@@ -365,9 +365,9 @@ async def chunk_store_and_retrieve(
     logger.info("Phase 1: Semantic Chunking")
     # 2. Concurrently chunk all page content
     chunk_tasks = []
-    chunk_task_metadata = [] # To map results back to bias_type
+    chunk_task_metadata = [] # To map results back to objective_id
     
-    for bias_type, contents in contents_by_bias.items():
+    for objective_id, contents in contents_by_objective.items():
         for item in contents:
             if isinstance(item, dict):
                 content = item.get("content", "")
@@ -376,22 +376,22 @@ async def chunk_store_and_retrieve(
                 content = item
                 url = ""
             chunk_tasks.append(chunker.chunk(content))
-            chunk_task_metadata.append({"bias_type": bias_type, "url": url})
+            chunk_task_metadata.append({"objective_id": objective_id, "url": url})
             
     if not chunk_tasks:
         logger.warning("No content to chunk. Returning empty matches.")
-        return {b: [] for b in queries_by_bias.keys()}
+        return {b: [] for b in queries_by_objective.keys()}
             
     chunk_results = await asyncio.gather(*chunk_tasks)
     
-    # Flatten, clean and map chunks to bias type and url
+    # Flatten, clean and map chunks to objective_id and url
     all_chunks = []
-    chunk_bias_types = []
+    chunk_objective_ids = []
     chunk_urls = []
     
     for i, chunks in enumerate(chunk_results):
         meta = chunk_task_metadata[i]
-        bias_type = meta["bias_type"]
+        objective_id = meta["objective_id"]
         url = meta["url"]
         
         cleaned = [clean_chunk_text(c) for c in chunks]
@@ -399,27 +399,27 @@ async def chunk_store_and_retrieve(
         cleaned = [c for c in cleaned if len(c.split()) >= 100]
         
         all_chunks.extend(cleaned)
-        chunk_bias_types.extend([bias_type] * len(cleaned))
+        chunk_objective_ids.extend([objective_id] * len(cleaned))
         chunk_urls.extend([url] * len(cleaned))
         
     logger.info(f"Generated {len(all_chunks)} total chunks.")
     
     if not all_chunks:
-        return {b: [] for b in queries_by_bias.keys()}
+        return {b: [] for b in queries_by_objective.keys()}
         
-    logger.info("Phase 2: Embedding chunks")
     # 3. Generate embeddings in parallel for all chunks
-    for idx, chunk in enumerate(all_chunks):
-        first_sentence = chunk.split(".")[0].strip() if "." in chunk else chunk.strip()
-        words = first_sentence.split()
-        short_text = " ".join(words[:10]) + ("..." if len(words) > 10 else "")
-        logger.info(f"Embedding chunk {idx+1}/{len(all_chunks)}: '{short_text}'")
-    chunk_embeddings = await chunker.embed_sentences(all_chunks)
+    chunk_embeddings = []
+    # Implementation 1 of Stability Fix: Batch the local embedding generation to avoid massive memory spikes
+    batch_size = 100
+    for idx in range(0, len(all_chunks), batch_size):
+        batch = all_chunks[idx:idx + batch_size]
+        batch_embs = await chunker.embed_sentences(batch)
+        chunk_embeddings.extend(batch_embs)
     
     # Apply >= 0.95 Deduplication
     unique_chunks = []
     unique_embeddings = []
-    unique_bias_types = []
+    unique_objective_ids = []
     unique_urls = []
     duplicate_chunks = []
     duplicate_urls = []
@@ -439,7 +439,7 @@ async def chunk_store_and_retrieve(
                 keep_indices.append(i)
                 unique_chunks.append(all_chunks[i])
                 unique_embeddings.append(chunk_embeddings[i])
-                unique_bias_types.append(chunk_bias_types[i])
+                unique_objective_ids.append(chunk_objective_ids[i])
                 unique_urls.append(chunk_urls[i])
             else:
                 duplicate_chunks.append(all_chunks[i])
@@ -448,7 +448,7 @@ async def chunk_store_and_retrieve(
         logger.info(f"Deduplicated chunks: {len(all_chunks)} -> {len(unique_chunks)}")
         all_chunks = unique_chunks
         chunk_embeddings = unique_embeddings
-        chunk_bias_types = unique_bias_types
+        chunk_objective_ids = unique_objective_ids
         chunk_urls = unique_urls
 
     # Save to evidence folder grouped by URL
@@ -486,7 +486,7 @@ async def chunk_store_and_retrieve(
     unique_documents = [
         Document(
             page_content=chunk,
-            metadata={"bias_type": chunk_bias_types[idx], "url": chunk_urls[idx]}
+            metadata={"objective_id": chunk_objective_ids[idx], "url": chunk_urls[idx]}
         )
         for idx, chunk in enumerate(all_chunks)
     ]
@@ -497,19 +497,20 @@ async def chunk_store_and_retrieve(
     )
         
     logger.info("Phase 4: Diverse Local Retrieval (MMR)")
+    resolved_fetch_k = max(fetch_k, top_k * 2)
     retrieval_matches = {}
-    for bias_type, q_text in queries_by_bias.items():
+    for objective_id, q_text in queries_by_objective.items():
         if not q_text.strip():
-            retrieval_matches[bias_type] = []
+            retrieval_matches[objective_id] = []
             continue
             
-        logger.info(f"Performing LangChain MMR search for {bias_type}: '{q_text}'")
+        logger.info(f"Performing LangChain MMR search for {objective_id}: '{q_text}'")
         retrieved_docs = vectorstore.max_marginal_relevance_search(
             query=q_text,
             k=top_k,
-            fetch_k=fetch_k,
+            fetch_k=resolved_fetch_k,
             lambda_mult=lambda_mult,
-            filter=lambda doc: doc.metadata.get("bias_type") == bias_type
+            filter=lambda doc: doc.metadata.get("objective_id") == objective_id
         )
         
         # Calculate exact similarity scores for output compatibility
@@ -529,6 +530,6 @@ async def chunk_store_and_retrieve(
                     "url": doc.metadata.get("url", "")
                 })
                 
-        retrieval_matches[bias_type] = mmr_matches
+        retrieval_matches[objective_id] = mmr_matches
         
     return retrieval_matches

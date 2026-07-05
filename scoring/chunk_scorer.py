@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 import re
 import logging
 import json
+import asyncio
 
 from Columbus.scoring.local_reranker import LocalReranker
 
@@ -12,7 +13,7 @@ class BaseChunkScorer(ABC):
     """Abstract base class for scoring the relevance of retrieved chunks."""
     
     @abstractmethod
-    def score_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def score_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         """
         Score a list of chunks based on their relevance to the queries.
         
@@ -20,6 +21,7 @@ class BaseChunkScorer(ABC):
             original_query: The main research question from the user.
             decomposed_query: The specific sub-query/perspective these chunks were retrieved for.
             chunks: List of chunk dictionaries containing at least a 'text' key.
+            callbacks: Optional LangChain callbacks.
             
         Returns:
             List of chunk dictionaries with updated 'score' or 'rerank_score'.
@@ -27,7 +29,7 @@ class BaseChunkScorer(ABC):
         pass
         
     @abstractmethod
-    async def ascore_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def ascore_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         """
         Asynchronously score a list of chunks based on their relevance to the queries.
         """
@@ -39,7 +41,7 @@ class RerankerChunkScorer(BaseChunkScorer):
     def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3"):
         self.reranker = LocalReranker(model_name=model_name)
         
-    def score_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def score_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         if not chunks:
             return []
             
@@ -57,7 +59,8 @@ class RerankerChunkScorer(BaseChunkScorer):
             ranked_candidates = self.reranker.rerank(
                 query=original_query,
                 candidates=candidates,
-                top_n=len(chunks)
+                top_n=len(chunks),
+                callbacks=callbacks
             )
             
             # Reconstruct the original chunk dictionaries with the new scores
@@ -72,14 +75,13 @@ class RerankerChunkScorer(BaseChunkScorer):
         except Exception as e:
             logger.error(f"Failed to rerank chunks using PineconeReranker: {e}")
             return chunks
-
-    async def ascore_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        import asyncio
+ 
+    async def ascore_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         loop = asyncio.get_running_loop()
         # SentenceTransformers is CPU/GPU bound, run in a thread pool to avoid blocking the event loop
-        return await loop.run_in_executor(None, self.score_chunks, original_query, decomposed_query, chunks)
+        return await loop.run_in_executor(None, self.score_chunks, original_query, decomposed_query, chunks, callbacks)
 
-from Columbus.scoring.prompts import BATCH_CHUNK_RELEVANCE_SCORING_PROMPT
+from Columbus.scoring.prompts import BATCH_CHUNK_RELEVANCE_SCORING_PROMPT, CHUNK_RELEVANCE_SCORING_PROMPT
 from langchain_core.output_parsers import JsonOutputParser
 
 
@@ -89,76 +91,8 @@ class LLMChunkScorer(BaseChunkScorer):
     def __init__(self, llm):
         self.llm = llm
         self.parser = JsonOutputParser()
-        
-    def _score_single_chunk_sync(self, original_query: str, decomposed_query: str, chunk: Dict[str, Any]):
-        chunk_text = chunk.get("text", "")
-        if not chunk_text:
-            return
-        from Columbus.scoring.prompts import CHUNK_RELEVANCE_SCORING_PROMPT
-        try:
-            chain = CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
-            result = chain.invoke({
-                "original_query": original_query,
-                "decomposed_query": decomposed_query,
-                "chunk_text": chunk_text
-            })
-            if result:
-                chunk["score"] = float(result.get("relevance_score", 0.0))
-                chunk["llm_reasoning"] = result.get("reasoning", "")
-        except Exception as e:
-            logger.error(f"Single chunk sync fallback failed: {e}")
 
-    async def _ascore_single_chunk(self, original_query: str, decomposed_query: str, chunk: Dict[str, Any]):
-        chunk_text = chunk.get("text", "")
-        if not chunk_text:
-            return
-        from Columbus.scoring.prompts import CHUNK_RELEVANCE_SCORING_PROMPT
-        try:
-            chain = CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
-            result = await chain.ainvoke({
-                "original_query": original_query,
-                "decomposed_query": decomposed_query,
-                "chunk_text": chunk_text
-            })
-            if result:
-                chunk["score"] = float(result.get("relevance_score", 0.0))
-                chunk["llm_reasoning"] = result.get("reasoning", "")
-        except Exception as e:
-            logger.error(f"Single chunk async fallback failed: {e}")
-
-    async def _ascore_batch(self, original_query: str, decomposed_query: str, batch_chunks: List[Dict[str, Any]], batch_idx: int):
-        chunks_list_str = ""
-        for idx, chunk in enumerate(batch_chunks):
-            chunks_list_str += f"--- Chunk Index {idx} ---\n{chunk.get('text', '')}\n\n"
-            
-        try:
-            chain = BATCH_CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
-            result = await chain.ainvoke({
-                "original_query": original_query,
-                "decomposed_query": decomposed_query,
-                "chunks_list": chunks_list_str
-            })
-            if result and "evaluations" in result:
-                evaluations = result["evaluations"]
-                for eval_item in evaluations:
-                    try:
-                        idx = int(eval_item.get("chunk_index", -1))
-                        if 0 <= idx < len(batch_chunks):
-                            score = float(eval_item.get("relevance_score", 0.0))
-                            batch_chunks[idx]["score"] = score
-                            batch_chunks[idx]["llm_reasoning"] = eval_item.get("reasoning", "")
-                    except Exception as e:
-                        logger.error(f"Error mapping async eval item: {e}")
-            else:
-                logger.warning(f"Failed to parse async batch JSON. Falling back to individual scoring for batch {batch_idx}.")
-                for chunk in batch_chunks:
-                    await self._ascore_single_chunk(original_query, decomposed_query, chunk)
-        except Exception as e:
-            logger.error(f"Failed to execute async batch relevance scoring for batch {batch_idx}: {e}. Falling back to individual.")
-            for chunk in batch_chunks:
-                await self._ascore_single_chunk(original_query, decomposed_query, chunk)
-
-    def score_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def score_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         if not chunks:
             return []
             
@@ -177,12 +111,13 @@ class LLMChunkScorer(BaseChunkScorer):
                 chunks_list_str += f"--- Chunk Index {idx} ---\n{chunk.get('text', '')}\n\n"
                 
             try:
-                chain = BATCH_CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
-                result = chain.invoke({
+                batch_chain = BATCH_CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
+                result = batch_chain.invoke({
                     "original_query": original_query,
                     "decomposed_query": decomposed_query,
                     "chunks_list": chunks_list_str
-                })
+                }, config={"callbacks": callbacks} if callbacks else {})
+                
                 if result and "evaluations" in result:
                     evaluations = result["evaluations"]
                     # Map evaluations back
@@ -196,35 +131,110 @@ class LLMChunkScorer(BaseChunkScorer):
                         except Exception as e:
                             logger.error(f"Error mapping eval item: {e}")
                 else:
-                    logger.warning(f"Failed to parse batch JSON. Falling back to individual scoring for batch {i//batch_size}.")
-                    for chunk in batch_chunks:
-                        self._score_single_chunk_sync(original_query, decomposed_query, chunk)
+                    logger.warning(f"Failed to parse batch JSON. Falling back to native LangChain batch scoring for batch {i//batch_size}.")
+                    self._fallback_batch_sync(original_query, decomposed_query, batch_chunks, callbacks)
             except Exception as e:
-                logger.error(f"Failed to execute batch relevance scoring: {e}. Falling back to individual.")
-                for chunk in batch_chunks:
-                    self._score_single_chunk_sync(original_query, decomposed_query, chunk)
+                logger.error(f"Failed to execute batch relevance scoring: {e}. Falling back to native LangChain batch scoring.")
+                self._fallback_batch_sync(original_query, decomposed_query, batch_chunks, callbacks)
                     
         # Sort by the new LLM score descending
         scored_chunks.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return scored_chunks
 
-    async def ascore_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _fallback_batch_sync(self, original_query: str, decomposed_query: str, batch_chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]]):
+        """Uses LangChain's native .batch() to score chunks concurrently using a ThreadPoolExecutor internally."""
+        single_chain = CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
+        
+        batch_inputs = [{
+            "original_query": original_query,
+            "decomposed_query": decomposed_query,
+            "chunk_text": chunk.get("text", "")
+        } for chunk in batch_chunks]
+        
+        try:
+            results = single_chain.batch(batch_inputs, config={"callbacks": callbacks} if callbacks else {}, return_exceptions=True)
+            for chunk, result in zip(batch_chunks, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Single chunk sync fallback failed: {result}")
+                elif result:
+                    chunk["score"] = float(result.get("relevance_score", 0.0))
+                    chunk["llm_reasoning"] = result.get("reasoning", "")
+        except Exception as e:
+            logger.error(f"Fallback batch failed completely: {e}")
+
+    async def ascore_chunks(self, original_query: str, decomposed_query: str, chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         if not chunks:
             return []
             
         logger.info(f"LLM async batch-scoring {len(chunks)} chunks against original query: '{original_query}'")
         
         batch_size = 10
-        tasks = []
+        batches = [chunks[i:i+batch_size] for i in range(0, len(chunks), batch_size)]
         
-        # Divide into batches
-        for i in range(0, len(chunks), batch_size):
-            batch_chunks = chunks[i:i+batch_size]
-            tasks.append(self._ascore_batch(original_query, decomposed_query, batch_chunks, i//batch_size))
+        # Prepare batch payloads
+        batch_inputs = []
+        for batch in batches:
+            chunks_list_str = ""
+            for idx, chunk in enumerate(batch):
+                chunks_list_str += f"--- Chunk Index {idx} ---\n{chunk.get('text', '')}\n\n"
             
-        await asyncio.gather(*tasks)
+            batch_inputs.append({
+                "original_query": original_query,
+                "decomposed_query": decomposed_query,
+                "chunks_list": chunks_list_str
+            })
+            
+        # Concurrently score batches using abatch
+        try:
+            batch_chain = BATCH_CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
+            results = await batch_chain.abatch(batch_inputs, config={"callbacks": callbacks} if callbacks else {}, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"abatch failed completely: {e}")
+            results = [e] * len(batch_inputs)
         
+        # Map evaluations back to chunks
+        for i, result in enumerate(results):
+            batch_chunks = batches[i]
+            if isinstance(result, Exception):
+                logger.warning(f"Batch {i} failed during abatch: {result}. Falling back to native LangChain abatch scoring.")
+                await self._fallback_batch_async(original_query, decomposed_query, batch_chunks, callbacks)
+            elif result and "evaluations" in result:
+                evaluations = result["evaluations"]
+                for eval_item in evaluations:
+                    try:
+                        idx = int(eval_item.get("chunk_index", -1))
+                        if 0 <= idx < len(batch_chunks):
+                            score = float(eval_item.get("relevance_score", 0.0))
+                            batch_chunks[idx]["score"] = score
+                            batch_chunks[idx]["llm_reasoning"] = eval_item.get("reasoning", "")
+                    except Exception as e:
+                        logger.error(f"Error mapping async eval item: {e}")
+            else:
+                logger.warning(f"Failed to parse async batch JSON. Falling back to native LangChain abatch scoring for batch {i}.")
+                await self._fallback_batch_async(original_query, decomposed_query, batch_chunks, callbacks)
+                    
         # Sort by the new LLM score descending
         scored_chunks = list(chunks)
         scored_chunks.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return scored_chunks
+
+    async def _fallback_batch_async(self, original_query: str, decomposed_query: str, batch_chunks: List[Dict[str, Any]], callbacks: Optional[List[Any]]):
+        """Uses LangChain's native .abatch() to score chunks concurrently via asyncio."""
+        single_chain = CHUNK_RELEVANCE_SCORING_PROMPT | self.llm | self.parser
+        
+        batch_inputs = [{
+            "original_query": original_query,
+            "decomposed_query": decomposed_query,
+            "chunk_text": chunk.get("text", "")
+        } for chunk in batch_chunks]
+        
+        try:
+            results = await single_chain.abatch(batch_inputs, config={"callbacks": callbacks} if callbacks else {}, return_exceptions=True)
+            for chunk, result in zip(batch_chunks, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Single chunk async fallback failed: {result}")
+                elif result:
+                    chunk["score"] = float(result.get("relevance_score", 0.0))
+                    chunk["llm_reasoning"] = result.get("reasoning", "")
+        except Exception as e:
+            logger.error(f"Fallback async batch failed completely: {e}")

@@ -145,19 +145,12 @@ async def _scrape_single_url(
         try:
             logger.info("Scraping URL: %s", url)
             
-            # Use Firecrawl's native LLM extraction feature
-            extraction_schema = config.extraction_schema if config else None
-            scrape_params = {
-                "formats": ["extract"],
-                "extract": {
-                    "schema": extraction_schema or {"type": "object", "properties": {"summary": {"type": "string"}}}
-                }
-            }
-            
+            only_main_content = config.only_main_content if config else True
             result = await asyncio.to_thread(
                 app.scrape_url,
                 url,
-                params=scrape_params
+                formats=["markdown"],
+                only_main_content=only_main_content,
             )
             
             logger.info("Scraping complete for: %s", url)
@@ -422,18 +415,17 @@ async def scrape_urls_for_markdown(
                 result = await asyncio.to_thread(
                     app.scrape_url,
                     url,
-                    params={
-                        "formats": ["markdown"],
-                        "pageOptions": {
-                            "onlyMainContent": only_main_content,
-                        },
-                    },
+                    formats=["markdown"],
+                    only_main_content=only_main_content,
                 )
                 markdown = ""
                 html = ""
                 if isinstance(result, dict):
                     markdown = result.get("markdown", "")
                     html = result.get("html", "")
+                else:
+                    markdown = getattr(result, "markdown", "") or ""
+                    html = getattr(result, "html", "") or ""
                     if skip_links and markdown:
                         import re
                         markdown = re.sub(r'(?<!\!)\[([^\]\n]+)\]\([^)]+\)', r'\1', markdown)

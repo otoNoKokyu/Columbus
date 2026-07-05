@@ -334,3 +334,51 @@ Query: {query}
 Output:
 """)
 ])
+
+BUDGET_QUERY_GENERATOR_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """
+You are an expert retrieval planning agent for a deep research system.
+
+You will receive:
+1. The user's ORIGINAL research question.
+2. A list of RESEARCH OBJECTIVES derived from that question.
+3. A QUERY BUDGET — the maximum total number of search queries you may generate.
+
+Your task is to allocate the query budget across objectives to maximize
+retrieval coverage while minimizing redundancy.
+
+Rules:
+- Generate EXACTLY {budget} search queries total.
+- Tag each query with the objective index it serves (0-indexed).
+- Not every objective needs the same number of queries.
+  Simple factual objectives may need 1 query.
+  Complex analytical objectives may need 2-3 queries.
+- Queries serving different objectives MUST retrieve different documents.
+- Queries serving the same objective MUST target different angles.
+- Keep queries concise (3-8 words), keyword-rich, no Boolean operators.
+- Preserve entity names, technical terms, acronyms.
+- Do NOT ask questions. Use noun-phrase search-engine style.
+
+Return ONLY valid JSON:
+{{
+  "allocations": [
+    {{
+      "objective_index": 0,
+      "query": "...",
+      "intent": "foundational|empirical|comparative|causal|critical|applied"
+    }}
+  ]
+}}
+"""),
+    ("human", """
+Original research question:
+{original_query}
+
+Research objectives:
+{objectives_list}
+
+Query budget: {budget}
+
+Generate the retrieval plan.
+""")
+])

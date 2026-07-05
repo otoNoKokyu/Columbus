@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, List, Dict, TYPE_CHECKING
+from typing import Any, List, Dict, TYPE_CHECKING, Optional
+from langchain_core.runnables import RunnableLambda
 from ..search import async_search
 from ..crawl.recursive_crawler import frontier_balanced_crawl
 from ..types.types import Query, RewriterInput, CrawlResult, PerspectiveResult, ResearchOutput
@@ -8,12 +9,16 @@ if TYPE_CHECKING:
     from ..scoring.pinecone_reranker import PineconeReranker
 
 from ..llm import get_langchain_llm
-from ..rewriter.chain import create_balanced_rewrite_chain
+from ..rewriter.chain import create_adaptive_decomposition_chain
+from ..types.types import DecomposedQuery
 
-def decompose_query(query: str) -> Query:
+def decompose_query(query: str, query_budget: int = 6, callbacks: Optional[List[Any]] = None) -> DecomposedQuery:
     llm = get_langchain_llm(temperature=0.0)
-    rewrite_chain = create_balanced_rewrite_chain(llm)
-    rewritten_queries = rewrite_chain.invoke(RewriterInput(query=query))
+    rewrite_chain = create_adaptive_decomposition_chain(llm, query_budget=query_budget)
+    rewritten_queries = rewrite_chain.invoke(
+        {"query": query},
+        config={"callbacks": callbacks} if callbacks else {}
+    )
     return rewritten_queries
 
 async def search_crawl_rerank_single_query(
@@ -97,10 +102,10 @@ async def search_crawl_rerank_single_query(
     ]
 
 async def search_crawl_rerank_queries(
-    query: Query,
+    decomposed: DecomposedQuery,
     original_user_input: str,
-    max_search: int = 30,
-    max_rerank: int = 5,
+    max_search: int = 10,
+    max_rerank: int = 10,
     recursive_crawl: bool = False,
     max_depth: int | None = None,
     chunking_strategy: str = "semantic",
@@ -120,105 +125,119 @@ async def search_crawl_rerank_queries(
     import logging
     from ..scoring.local_reranker import LocalReranker
     from ..chunk_and_retrieve.main import chunk_store_and_retrieve
+    from Columbus.crawl.rate_limiter import RateLimiter
+    from ..search import fan_out_search
+    from ..crawl.recursive_crawler import frontier_balanced_crawl
 
     logger = logging.getLogger(__name__)
 
     if recursive_crawl:
         if max_depth is None or max_depth < 1:
             raise ValueError("max_depth must be at least 1 when recursive_crawl is enabled")
+        actual_depth = max_depth
+    else:
+        actual_depth = 0
 
-    from Columbus.crawl.rate_limiter import RateLimiter
-    
     api_key = os.environ.get("FIRECRAWL_API_KEY")
     reranker = LocalReranker(model_name="BAAI/bge-reranker-v2-m3", top_n=max_rerank)
-    
-    # Use a single global rate limiter across all 5 branches to avoid Firecrawl 429 / queue timeouts
     global_rate_limiter = RateLimiter(max_concurrent=2, max_requests_per_window=10, window_seconds=60.0)
 
-    logger.info("Decomposed Queries JSON:\n%s", json.dumps(query.model_dump(), indent=2))
+    # 1. Fan-out Search
+    queries = decomposed.get_flat_query_strings()
+    logger.info("Executing global fan-out search for %d queries", len(queries))
+    
+    # We pass deduplicate=True to fan_out_search so it returns unique URLs
+    # and keeps the source_query for the first query that found it
+    search_results = await fan_out_search(
+        queries=queries,
+        provider="exa",
+        max_results_per_query=max_search,
+        deduplicate=True,
+        top_n=100  # Pull a large pool before global rerank
+    )
+    
+    # Filter out already visited URLs
+    if visited_urls:
+        visited_set = set(visited_urls)
+        search_results = [res for res in search_results if res.get("url") not in visited_set]
 
-    # Build tasks for branches
-    tasks = []
-    bias_types = []
-
-    for bias_type, q_text in query.model_dump().items():
-        if isinstance(q_text, str) and q_text.strip():
-            bias_types.append((bias_type, q_text))
-            
-    # Check if cache exists and load it to bypass network calls
-    pages_results = None
-    if cache_file and os.path.exists(cache_file):
-        logger.info(f"Loading raw crawl results from cache: {cache_file}")
-        try:
-            with open(cache_file, "r") as f:
-                cached_data = json.load(f)
-                if len(cached_data) == len(bias_types):
-                    pages_results = [[CrawlResult(**page) for page in branch] for branch in cached_data]
-                else:
-                    logger.warning(f"Cache mismatch: expected {len(bias_types)} branches, got {len(cached_data)}. Ignoring cache.")
-        except Exception as e:
-            logger.error(f"Failed to load cache from {cache_file}: {e}")
-            
-    if pages_results is None:
-        logger.info("No cache found. Executing full Exa Search and Firecrawl Scraping...")
-        for bias_type, q_text in bias_types:
-            tasks.append(
-                search_crawl_rerank_single_query(
-                    bias_type,
-                    q_text,
-                    reranker,
-                    api_key,
-                    global_rate_limiter,
-                    max_search=max_search,
-                    max_rerank=max_rerank,
-                    recursive_crawl=recursive_crawl,
-                    max_depth=max_depth,
-                    exa_highlight=exa_highlight,
-                    return_markdown=return_markdown,
-                    academic_citations=academic_citations,
-                    skip_links=skip_links,
-                    visited_urls=visited_urls,
-                )
+    # 2. Global Rerank
+    logger.info("Reranking %d unique search results against original user input", len(search_results))
+    reranked_results = reranker.rerank(
+        query=original_user_input, 
+        candidates=search_results, 
+        top_n=max_rerank
+    )
+    
+    # 3. Frontier Crawl (Global)
+    logger.info("Executing frontier crawl on top %d global URLs", len(reranked_results))
+    scraped_pages = await frontier_balanced_crawl(
+        seed_candidates=reranked_results,
+        query=original_user_input,
+        reranker=reranker,
+        max_depth=actual_depth,
+        pages_per_level=[5, 4, 3],
+        score_threshold=0.7,
+        api_key=api_key,
+        rate_limiter=global_rate_limiter,
+        return_markdown=return_markdown,
+        academic_citations=academic_citations,
+        skip_links=skip_links,
+        visited=set(visited_urls) if visited_urls else None,
+    )
+    
+    # Create mapping from url to its source query (from fan_out_search)
+    url_to_source_query = {r.get("url"): r.get("source_query") for r in search_results}
+    
+    # Create mapping from query to objective_id
+    query_to_obj_id = {sq.query: sq.objective_id for sq in decomposed.search_queries}
+    query_to_obj_text = {sq.query: sq.objective_text for sq in decomposed.search_queries}
+    
+    perspectives_map = {} # objective_id -> PerspectiveResult
+    contents_by_objective = {}
+    queries_by_objective = {}
+    
+    # Initialize for all objectives
+    for sq in decomposed.search_queries:
+        if sq.objective_id not in perspectives_map:
+            perspectives_map[sq.objective_id] = PerspectiveResult(
+                objective_id=sq.objective_id,
+                objective_text=sq.objective_text,
+                rewritten_query=sq.query,
+                pages_crawled=[]
             )
-
-        # Concurrently run the single query search/crawl pipeline
-        pages_results = await asyncio.gather(*tasks)
-        
-        # Save to cache for next run
-        if cache_file:
-            logger.info(f"Saving raw crawl results to cache: {cache_file}")
-            try:
-                with open(cache_file, "w") as f:
-                    serialized_data = [[page.model_dump() for page in branch] for branch in pages_results]
-                    json.dump(serialized_data, f, indent=4)
-            except Exception as e:
-                logger.error(f"Failed to write cache to {cache_file}: {e}")
-
-    # Prepare for chunking
-    contents_by_bias = {}
-    queries_by_bias = {}
-    perspectives = []
-
-    for i, (bias_type, q_text) in enumerate(bias_types):
-        pages = pages_results[i]
-        contents = [{"url": p.url, "content": p.content} for p in pages if p.content]
-
-        contents_by_bias[bias_type] = contents
-        queries_by_bias[bias_type] = q_text
-
-        perspectives.append(
-            PerspectiveResult(
-                bias_type=bias_type,
-                rewritten_query=q_text,
-                pages_crawled=pages
+            contents_by_objective[sq.objective_id] = []
+            queries_by_objective[sq.objective_id] = sq.query
+            
+    for page in scraped_pages:
+        url = page.get("url")
+        content = page.get("content")
+        if url and content:
+            source_q = url_to_source_query.get(url)
+            obj_id = query_to_obj_id.get(source_q)
+            if not obj_id:
+                # Fallback to the first objective if something went wrong
+                obj_id = decomposed.search_queries[0].objective_id
+                
+            crawl_res = CrawlResult(
+                url=url,
+                title=page.get("title") or "",
+                depth=page.get("depth") or 0,
+                score=page.get("score") or 0.0,
+                content=content,
+                token_count=page.get("token_count")
             )
-        )
+            
+            perspectives_map[obj_id].pages_crawled.append(crawl_res)
+            contents_by_objective[obj_id].append({"url": url, "content": content})
 
-    # Perform semantic chunking, deduplication, and retrieval
+    perspectives = list(perspectives_map.values())
+
+    # 4. Chunk and Retrieve
     retrieved_chunks = await chunk_store_and_retrieve(
         original_query=original_user_input,
-        queries_by_bias=queries_by_bias,
-        contents_by_bias=contents_by_bias,
+        queries_by_objective=queries_by_objective,
+        contents_by_objective=contents_by_objective,
         index_name="columbus-research",
         pinecone_api_key=os.environ.get("PINECONE_API_KEY"),
         chunking_strategy=chunking_strategy,
@@ -230,6 +249,7 @@ async def search_crawl_rerank_queries(
 
     return ResearchOutput(
         original_query=original_user_input,
+        decomposed=decomposed,
         perspectives=perspectives,
         retrieved_chunks=retrieved_chunks
     )

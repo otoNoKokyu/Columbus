@@ -3,11 +3,12 @@ from .tools import decompose_query, search_crawl_rerank_queries
 from langgraph.graph import StateGraph, END
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, model_validator
-from ..types.types import Query
+from ..types.types import DecomposedQuery
 
 class QueryState(BaseModel):
     user_input: str
-    decmoposed_queries: Optional[Query] = None
+    decmoposed_queries: Optional[DecomposedQuery] = None
+    query_budget: int = 6
     visited_urls: List[str] = []
     evidence: Optional[str] = None
     retrieved_chunks: Optional[Dict[str, List[Dict[str, Any]]]] = None
@@ -28,14 +29,14 @@ class QueryState(BaseModel):
         return self
 
 def DECOMPOSE(state: QueryState):
-    queries = decompose_query(state.user_input)
+    queries = decompose_query(state.user_input, query_budget=state.query_budget)
     return {"decmoposed_queries": queries}
 
 async def RESEARCH_AGENT(state: QueryState):
     if not state.decmoposed_queries:
         return {"evidence": "Error: Queries were not decomposed."}
     results = await search_crawl_rerank_queries(
-        query=state.decmoposed_queries,
+        decomposed=state.decmoposed_queries,
         original_user_input=state.user_input,
         max_search=state.max_search,
         max_rerank=state.max_rerank,
@@ -49,18 +50,17 @@ async def RESEARCH_AGENT(state: QueryState):
     )
     visited = []
     evidence_data = {
-        "supporting": [],
-        "opposing": [],
         "retrieved_chunks": results.retrieved_chunks
     }
 
     for perspective in results.perspectives:
+        obj_id = perspective.objective_id
+        if obj_id not in evidence_data:
+            evidence_data[obj_id] = []
+            
         for page in perspective.pages_crawled:
             visited.append(page.url)
-            if perspective.bias_type == "supporting":
-                evidence_data["supporting"].append(page.content)
-            elif perspective.bias_type == "opposing":
-                evidence_data["opposing"].append(page.content)
+            evidence_data[obj_id].append(page.content)
 
     return {
         "visited_urls": visited,

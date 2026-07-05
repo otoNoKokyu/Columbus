@@ -80,3 +80,109 @@ def create_balanced_rewrite_chain(
             | structured_llm
         ).with_config({"run_name": "BalancedQueryRewriterNode"})
     )
+
+def create_adaptive_decomposition_chain(
+    llm: BaseChatModel,
+    query_budget: int = 6,
+) -> Runnable:
+    from .prompts import (
+        QUERY_CLASSIFIER_PROMPT,
+        RESEARCH_PLANNER_PROMPT,
+        BUDGET_QUERY_GENERATOR_PROMPT,
+    )
+    from ..types.types import DecomposedQuery, SearchQuery
+
+    parser = JsonOutputParser()
+
+    def _adaptive_decompose(inputs: Dict[str, Any]) -> DecomposedQuery:
+        query = inputs["query"]
+        callbacks = inputs.get("callbacks")
+        config = {"callbacks": callbacks} if callbacks else {}
+
+        # 1. Classify
+        classifier_chain = QUERY_CLASSIFIER_PROMPT | llm | parser
+        try:
+            classification = classifier_chain.invoke({"query": query}, config=config)
+            q_type = classification.get("type", "single")
+        except Exception as e:
+            logger.error("Classification failed: %s", e)
+            q_type = "single"
+
+        # 2. Handle based on type
+        if q_type == "single":
+            # Just generate simple queries
+            rewrite_chain = create_rewrite_chain(llm, max_queries=min(3, query_budget))
+            queries = rewrite_chain.invoke({"question": query}, config=config)
+            
+            search_queries = [
+                SearchQuery(
+                    query=q, 
+                    objective_id="single", 
+                    objective_text="Direct query search",
+                    intent="foundational"
+                ) for q in queries
+            ]
+            
+            return DecomposedQuery(
+                original_query=query,
+                query_type="single",
+                objectives=["Direct query search"],
+                search_queries=search_queries
+            )
+        else:
+            # Multi-hop: Plan objectives
+            planner_chain = RESEARCH_PLANNER_PROMPT | llm | parser
+            try:
+                plan = planner_chain.invoke({"query": query}, config=config)
+                objectives = plan.get("objectives", [query])
+            except Exception as e:
+                logger.error("Planning failed: %s", e)
+                objectives = [query]
+                
+            # Generate budget-aware queries
+            generator_chain = BUDGET_QUERY_GENERATOR_PROMPT | llm | parser
+            obj_list_str = "\\n".join(f"{i}. {obj}" for i, obj in enumerate(objectives))
+            
+            try:
+                allocations_res = generator_chain.invoke({
+                    "original_query": query,
+                    "objectives_list": obj_list_str,
+                    "budget": query_budget
+                }, config=config)
+                
+                allocs = allocations_res.get("allocations", [])
+                
+                search_queries = []
+                for a in allocs:
+                    idx = int(a.get("objective_index", 0))
+                    if idx >= len(objectives):
+                        idx = 0
+                    
+                    search_queries.append(SearchQuery(
+                        query=a.get("query", ""),
+                        objective_id=f"obj_{idx}",
+                        objective_text=objectives[idx],
+                        intent=a.get("intent", "")
+                    ))
+                    
+                # Fallback if empty
+                if not search_queries:
+                    search_queries = [SearchQuery(query=query, objective_id="obj_0", objective_text=objectives[0])]
+                    
+                return DecomposedQuery(
+                    original_query=query,
+                    query_type="multi",
+                    objectives=objectives,
+                    search_queries=search_queries
+                )
+            except Exception as e:
+                logger.error("Budget query generation failed: %s", e)
+                # Fallback
+                return DecomposedQuery(
+                    original_query=query,
+                    query_type="multi",
+                    objectives=objectives,
+                    search_queries=[SearchQuery(query=query, objective_id="obj_0", objective_text=objectives[0])]
+                )
+
+    return RunnableLambda(_adaptive_decompose).with_config({"run_name": "AdaptiveDecompositionNode"})

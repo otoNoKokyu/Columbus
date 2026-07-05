@@ -10,12 +10,14 @@ Usage::
     # → ["RAG retrieval augmented generation overview", ...]
 """
 
-from .chain import create_rewrite_chain, create_balanced_rewrite_chain
-from .prompts import QUERY_REWRITE_PROMPT, BALANCED_REWRITE_PROMPT
+from .chain import create_rewrite_chain, create_balanced_rewrite_chain, create_adaptive_decomposition_chain
+from .prompts import QUERY_REWRITE_PROMPT, BALANCED_REWRITE_PROMPT, BUDGET_QUERY_GENERATOR_PROMPT
 
 __all__ = [
     "create_rewrite_chain",
     "create_balanced_rewrite_chain",
+    "create_adaptive_decomposition_chain",
     "QUERY_REWRITE_PROMPT",
     "BALANCED_REWRITE_PROMPT",
+    "BUDGET_QUERY_GENERATOR_PROMPT",
 ]
