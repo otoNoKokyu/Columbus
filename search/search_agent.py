@@ -224,9 +224,9 @@ async def fan_out_search(
             logger.info("        Snippet: %s...", snippet[:120].replace('\n', ' '))
     logger.info("=====================================")
 
-    # Merge and deduplicate
+    # Merge and deduplicate, tracking all source queries per URL
     merged: List[Dict[str, Any]] = []
-    seen_urls: set = set()
+    url_index: Dict[str, int] = {}  # url → index in merged list
 
     for query, results in zip(unique_queries, all_results):
         if isinstance(results, BaseException):
@@ -234,10 +234,14 @@ async def fan_out_search(
             continue
         for result in results:
             url = result.get("url", "")
-            if deduplicate and url in seen_urls:
+            if deduplicate and url in url_index:
+                # Append this query to the existing entry's source_queries
+                merged[url_index[url]].setdefault("source_queries", []).append(query)
                 continue
-            seen_urls.add(url)
             result["source_query"] = query
+            result["source_queries"] = [query]
+            if deduplicate:
+                url_index[url] = len(merged)
             merged.append(result)
 
     logger.info(

@@ -36,7 +36,6 @@ async def search_crawl_rerank_single_query(
     max_rerank: int = 5,
     recursive_crawl: bool = False,
     max_depth: int | None = None,
-    exa_highlight: bool = False,
     return_markdown: bool = False,
     academic_citations: bool = False,
     skip_links: bool = True,
@@ -130,8 +129,6 @@ async def search_crawl_rerank_queries(
     chunking_strategy: str = "semantic",
     min_chunk_size: int = 500,
     chunk_overlap: int = 50,
-    exa_highlight: bool = False,
-    embedding_source: str = "local",
     return_markdown: bool = False,
     academic_citations: bool = False,
     skip_links: bool = True,
@@ -185,41 +182,36 @@ async def search_crawl_rerank_queries(
                 message=f"All search results were already visited. Visited set size: {len(visited_urls)}."
             )
 
-    # 2. Global Rerank
-    logger.info("Reranking %d unique search results against original user input", len(search_results))
-    reranked_results = reranker.rerank(
-        query=original_user_input, 
-        candidates=search_results, 
-        top_n=max_rerank
-    )
-
-    if not reranked_results:
-        raise PipelineEarlyExit(
-            reason=EarlyExitReason.NO_URLS_AFTER_RERANK,
-            value=len(search_results),
-            message=f"Global reranker returned 0 candidates from a pool of {len(search_results)} URLs."
-        )
-
-    # Apply score threshold — drop anything below score_threshold before crawl
-    reranked_results = [r for r in reranked_results if r.get("rerank_score", 0.0) >= score_threshold]
+    # 2. Filter by Exa's semantic relevance score
+    filtered_results = [r for r in search_results if (r.get("score") or 0.0) >= score_threshold]
     logger.info(
-        "%d URLs survived score_threshold >= %.2f filter (pre-crawl)",
-        len(reranked_results), score_threshold
+        "%d / %d URLs survived Exa score >= %.2f filter",
+        len(filtered_results), len(search_results), score_threshold
     )
-    if not reranked_results:
+    if not filtered_results:
         raise PipelineEarlyExit(
             reason=EarlyExitReason.NO_URLS_AFTER_SCORE_THRESHOLD,
             value=score_threshold,
             message=(
-                f"All reranked URLs had rerank_score < {score_threshold}. "
+                f"All search results had Exa score < {score_threshold}. "
                 "Try lowering score_threshold or broadening the query."
             )
         )
+
+    # Sort by Exa score descending and cap total URLs
+    filtered_results.sort(key=lambda r: r.get("score") or 0.0, reverse=True)
+    num_objectives = len(set(sq.objective_id for sq in decomposed.search_queries))
+    url_cap = max(max_rerank, num_objectives * 5)
+    capped_results = filtered_results[:url_cap]
+    logger.info(
+        "Proceeding to crawl with %d URLs (cap: %d, objectives: %d)",
+        len(capped_results), url_cap, num_objectives
+    )
     
     # 3. Frontier Crawl (Global)
-    logger.info("Executing frontier crawl on top %d global URLs", len(reranked_results))
+    logger.info("Executing frontier crawl on top %d global URLs", len(capped_results))
     scraped_pages = await frontier_balanced_crawl(
-        seed_candidates=reranked_results,
+        seed_candidates=capped_results,
         query=original_user_input,
         reranker=reranker,
         max_depth=actual_depth,
@@ -243,12 +235,22 @@ async def search_crawl_rerank_queries(
             )
         )
     
-    # Create mapping from url to its source query (from fan_out_search)
-    url_to_source_query = {r.get("url"): r.get("source_query") for r in search_results}
-    
     # Create mapping from query to objective_id
     query_to_obj_id = {sq.query: sq.objective_id for sq in decomposed.search_queries}
-    query_to_obj_text = {sq.query: sq.objective_text for sq in decomposed.search_queries}
+    
+    # Build url → set of objective_ids (using source_queries from fan_out_search)
+    url_to_obj_ids: Dict[str, set] = {}
+    for r in search_results:
+        url = r.get("url")
+        if not url:
+            continue
+        all_src_queries = r.get("source_queries", [])
+        if not all_src_queries and r.get("source_query"):
+            all_src_queries = [r["source_query"]]
+        for sq in all_src_queries:
+            obj_id = query_to_obj_id.get(sq)
+            if obj_id:
+                url_to_obj_ids.setdefault(url, set()).add(obj_id)
     
     perspectives_map = {} # objective_id -> PerspectiveResult
     contents_by_objective = {}
@@ -270,11 +272,10 @@ async def search_crawl_rerank_queries(
         url = page.get("url")
         content = page.get("content")
         if url and content:
-            source_q = url_to_source_query.get(url)
-            obj_id = query_to_obj_id.get(source_q)
-            if not obj_id:
-                # Fallback to the first objective if something went wrong
-                obj_id = decomposed.search_queries[0].objective_id
+            obj_ids = url_to_obj_ids.get(url)
+            if not obj_ids:
+                # Fallback to the first objective if no mapping found
+                obj_ids = {decomposed.search_queries[0].objective_id}
                 
             crawl_res = CrawlResult(
                 url=url,
@@ -285,8 +286,13 @@ async def search_crawl_rerank_queries(
                 token_count=page.get("token_count")
             )
             
-            perspectives_map[obj_id].pages_crawled.append(crawl_res)
-            contents_by_objective[obj_id].append({"url": url, "content": content})
+            for obj_id in obj_ids:
+                perspectives_map[obj_id].pages_crawled.append(crawl_res)
+                contents_by_objective[obj_id].append({"url": url, "content": content})
+    
+    # Log per-objective page counts
+    for obj_id, perspective in perspectives_map.items():
+        logger.info("Objective '%s': %d pages assigned", obj_id, len(perspective.pages_crawled))
 
     total_content_items = sum(len(v) for v in contents_by_objective.values())
     if total_content_items == 0:
@@ -311,7 +317,6 @@ async def search_crawl_rerank_queries(
         chunking_strategy=chunking_strategy,
         min_chunk_size=min_chunk_size,
         chunk_overlap=chunk_overlap,
-        embedding_source=embedding_source,
         top_k=top_k,
     )
 

@@ -6,18 +6,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from Columbus.pipeline.factory import create_research_chain
-from Columbus.pipeline.config import ResearchPipelineConfig
+from Columbus.agents.agents import graph
 
 app = FastAPI(title="Columbus Agent API")
 
-from Columbus.utils.logger import logger
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Keep a single instance of the chain for the server lifetime
-pipeline_chain = create_research_chain(ResearchPipelineConfig())
+from Columbus.utils.logger import logger
 
 class ResearchRequest(BaseModel):
     query: str
@@ -31,10 +36,13 @@ async def event_generator(query: str) -> AsyncGenerator[str, None]:
     logger.info("Starting stream for query: %s", query)
     
     # version="v2" is recommended for LangChain >= 0.2
-    events_stream = pipeline_chain.astream_events(
-        {"query": query},
+    events_stream = graph.astream_events(
+        {"user_input": query},
         version="v2",
     )
+    
+    valid_nodes = {"DECOMPOSE", "RESEARCH", "CRITIC", "SYNTHESIZER"}
+    active_node = None
     
     try:
         async for event in events_stream:
@@ -42,26 +50,38 @@ async def event_generator(query: str) -> AsyncGenerator[str, None]:
             run_name = event.get("name", "")
             
             # 1. Overview of stages
-            if event_type == "on_chain_start" and run_name.startswith("Stage"):
+            if event_type == "on_chain_start" and run_name in valid_nodes:
+                active_node = run_name
                 yield json.dumps({
                     "type": "stage_start",
                     "stage": run_name,
                 })
-            elif event_type == "on_chain_end" and run_name.startswith("Stage"):
+            elif event_type == "on_chain_end" and run_name in valid_nodes:
+                if active_node == run_name:
+                    active_node = None
                 yield json.dumps({
                     "type": "stage_end",
                     "stage": run_name,
                 })
             
-            # 2. Detailed stream for Query Decomposition (Rewrite)
+            # 2. Detailed stream for Synthesis
             elif event_type == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                if hasattr(chunk, "content"):
-                    yield json.dumps({
-                        "type": "token",
-                        "content": chunk.content,
-                        "node": run_name
-                    })
+                # Only stream tokens to the frontend if we are in the SYNTHESIZER node
+                if active_node == "SYNTHESIZER":
+                    chunk = event["data"]["chunk"]
+                    if hasattr(chunk, "content"):
+                        content_val = chunk.content
+                        if isinstance(content_val, list):
+                            texts = [item.get("text", "") for item in content_val if isinstance(item, dict) and "text" in item]
+                            content_val = "".join(texts)
+                        elif not isinstance(content_val, str):
+                            content_val = str(content_val)
+                            
+                        yield json.dumps({
+                            "type": "token",
+                            "content": content_val,
+                            "node": run_name
+                        })
 
     except Exception as e:
         logger.error("Pipeline streaming error: %s", e)

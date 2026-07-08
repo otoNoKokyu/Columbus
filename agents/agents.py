@@ -4,7 +4,7 @@ from .tools import decompose_query, search_crawl_rerank_queries
 from Columbus.utils.logger import logger
 from langgraph.graph import StateGraph, END
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 from ..types.types import DecomposedQuery
 from Columbus.report_synthesizer.main import synthesize_report
 
@@ -13,27 +13,14 @@ class QueryState(BaseModel):
     decmoposed_queries: Optional[DecomposedQuery] = None
     query_budget: int = 6
     visited_urls: List[str] = []
-    evidence: Optional[str] = None
     retrieved_chunks: Optional[Dict[str, List[Dict[str, Any]]]] = None
     max_rerank: int = 10
     max_search: int = 10
-    recursive_crawl: bool = False
-    max_depth: Optional[int] = None
-    chunking_strategy: str = "semantic"
-    embedding_source: str = "local"
-    min_chunk_size: int = 500
-    chunk_overlap: int = 50
-    exa_highlight: bool = False
+    score_threshold: float = 0.7
     current_turn: int = 1
     max_turns: int = 2
     critic_evaluation: Optional[Dict[str, Any]] = None
     report: Optional[str] = None
-
-    @model_validator(mode="after")
-    def validate_depth(self):
-        if self.recursive_crawl and (self.max_depth is None or self.max_depth < 1):
-            raise ValueError("max_depth must be at least 1 when recursive_crawl is True")
-        return self
 
 def DECOMPOSE(state: QueryState):
     logger.info(f"--- [NODE] DECOMPOSE (Turn {state.current_turn}) ---")
@@ -97,21 +84,15 @@ async def RESEARCH_AGENT(state: QueryState):
     logger.info(f"--- [NODE] RESEARCH_AGENT (Turn {state.current_turn}) ---")
     if not state.decmoposed_queries:
         logger.error("Queries were not decomposed.")
-        return {"evidence": "Error: Queries were not decomposed."}
+        return {}
         
     results = await search_crawl_rerank_queries(
         decomposed=state.decmoposed_queries,
         original_user_input=state.user_input,
         max_search=state.max_search,
         max_rerank=state.max_rerank,
-        recursive_crawl=state.recursive_crawl,
-        max_depth=state.max_depth,
-        chunking_strategy=state.chunking_strategy,
-        min_chunk_size=state.min_chunk_size,
-        chunk_overlap=state.chunk_overlap,
-        exa_highlight=state.exa_highlight,
-        embedding_source=state.embedding_source,
-        visited_urls=state.visited_urls, # Filter out already visited URLs
+        score_threshold=state.score_threshold,
+        visited_urls=state.visited_urls,
     )
     
     # 1. Accumulate visited URLs
@@ -126,31 +107,10 @@ async def RESEARCH_AGENT(state: QueryState):
     if results.retrieved_chunks:
         for obj_id, chunk_list in results.retrieved_chunks.items():
             new_chunks[obj_id] = chunk_list
-
-    # 3. Parse and merge evidence structure
-    existing_evidence = {}
-    if state.evidence:
-        try:
-            existing_evidence = json.loads(state.evidence)
-        except Exception:
-            pass
-
-    # Merge new perspective page content
-    for perspective in results.perspectives:
-        obj_id = perspective.objective_id
-        if obj_id not in existing_evidence:
-            existing_evidence[obj_id] = []
-        for page in perspective.pages_crawled:
-            if page.content and page.content not in existing_evidence[obj_id]:
-                existing_evidence[obj_id].append(page.content)
-
-    # Store aggregated chunks inside the evidence block
-    existing_evidence["retrieved_chunks"] = new_chunks
     
     logger.info(f"Research turn {state.current_turn} complete. Total visited URLs: {len(visited)}")
     return {
         "visited_urls": visited,
-        "evidence": json.dumps(existing_evidence, indent=4, ensure_ascii=False),
         "retrieved_chunks": new_chunks
     }
 
@@ -168,21 +128,7 @@ async def SYNTHESIZER_AGENT(state: QueryState):
             decomposed_list = state.decmoposed_queries.get_flat_query_strings()
             
     # Format evidence chunks using gather_evidence
-    evidence_str = ""
-    chunks = state.retrieved_chunks
-    if not chunks and state.evidence:
-        try:
-            ev_data = json.loads(state.evidence)
-            chunks = ev_data.get("retrieved_chunks")
-        except Exception:
-            pass
-            
-    if chunks:
-        evidence_str = gather_evidence(chunks)
-    
-    # If formatting chunks didn't yield anything but state.evidence is a raw string, fallback to it
-    if not evidence_str and state.evidence:
-        evidence_str = state.evidence
+    evidence_str = gather_evidence(state.retrieved_chunks) if state.retrieved_chunks else ""
 
     report = await synthesize_report(
         original_query=state.user_input,
